@@ -1,0 +1,478 @@
+import type {
+  IceCandidateMessage,
+  WebRtcAnswerMessage,
+  WebRtcOfferMessage,
+} from '@screenshare/shared';
+import type { SocketEvent } from '../socket';
+import type { ISocketClient, Participant } from '../../types';
+import type { WebRtcManagerConfig, WebRtcManagerEvent, WebRtcManagerListener } from './types';
+
+/**
+ * Owns one RTCPeerConnection per remote participant.
+ * Both peers can renegotiate after local tracks change. A deterministic polite
+ * peer handles offer glare so simultaneous negotiation does not create two
+ * competing connections.
+ */
+export class WebRtcManager {
+  private readonly socketClient: ISocketClient;
+  private readonly rtcConfiguration: RTCConfiguration | undefined;
+  private readonly onEvent: ((event: WebRtcManagerEvent) => void) | undefined;
+  private readonly listeners = new Set<WebRtcManagerListener>();
+  private socketListenersAttached = false;
+  private readonly peerConnectionFactory: (configuration?: RTCConfiguration) => RTCPeerConnection;
+  private readonly peers = new Map<string, RTCPeerConnection>();
+  private readonly pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>();
+  private readonly remoteStreams = new Map<string, MediaStream>();
+  private readonly remoteTrackTimers = new Map<MediaStreamTrack, ReturnType<typeof setTimeout>>();
+  private readonly activeRemoteTracks = new Set<MediaStreamTrack>();
+  private readonly negotiating = new Set<string>();
+  private readonly negotiationPending = new Set<string>();
+  private readonly pendingSignals: Array<WebRtcOfferMessage | WebRtcAnswerMessage | IceCandidateMessage> = [];
+  private localStream: MediaStream | null = null;
+  private localRoomCode: string | null = null;
+  private localParticipantId: string | null = null;
+  private localIsHost = false;
+
+  private readonly handleOfferEvent = (event: SocketEvent): void => {
+    if (event.type === 'webrtcOffer') {
+      this.enqueueOrHandleSignal(event.payload.data);
+    }
+  };
+
+  private readonly handleAnswerEvent = (event: SocketEvent): void => {
+    if (event.type === 'webrtcAnswer') {
+      this.enqueueOrHandleSignal(event.payload.data);
+    }
+  };
+
+  private readonly handleIceCandidateEvent = (event: SocketEvent): void => {
+    if (event.type === 'iceCandidate') {
+      this.enqueueOrHandleSignal(event.payload.data);
+    }
+  };
+
+  constructor(socketClient: ISocketClient, config: WebRtcManagerConfig = {}) {
+    this.socketClient = socketClient;
+    this.rtcConfiguration = config.rtcConfiguration;
+    this.onEvent = config.onEvent;
+    this.peerConnectionFactory = config.peerConnectionFactory ?? ((configuration) => new RTCPeerConnection(configuration));
+    this.start();
+  }
+
+  /** Reattach signaling listeners after a lifecycle cleanup. */
+  start(): void {
+    if (this.socketListenersAttached) return;
+    this.socketClient.on('webrtcOffer', this.handleOfferEvent);
+    this.socketClient.on('webrtcAnswer', this.handleAnswerEvent);
+    this.socketClient.on('iceCandidate', this.handleIceCandidateEvent);
+    this.socketListenersAttached = true;
+  }
+
+  /** Set the identity used to route locally generated signaling messages. */
+  setLocalParticipant(
+    roomCode: string | null,
+    participantId: string | null,
+    isHost = false,
+  ): void {
+
+    this.localRoomCode = roomCode;
+    this.localParticipantId = participantId;
+    this.localIsHost = isHost;
+    if (!roomCode || !participantId) {
+      this.pendingSignals.length = 0;
+      this.closeAllPeers();
+      return;
+    }
+
+    const pendingSignals = this.pendingSignals.splice(0);
+    for (const signal of pendingSignals) {
+      this.enqueueOrHandleSignal(signal);
+    }
+  }
+
+  /** Return an existing peer or create exactly one for the participant. */
+  getOrCreatePeer(participantId: string): RTCPeerConnection {
+    const existingPeer = this.peers.get(participantId);
+    if (existingPeer) return existingPeer;
+
+    const peer = this.peerConnectionFactory(this.rtcConfiguration);
+    peer.onicecandidate = (event) => {
+      if (event.candidate) {
+        this.sendIceCandidate(participantId, event.candidate.toJSON());
+      }
+    };
+    peer.ontrack = (event) => {
+      const stream = event.streams[0] ?? new MediaStream([event.track]);
+      const track = event.track;
+      this.remoteStreams.set(participantId, stream);
+      if (!track.muted) this.activeRemoteTracks.add(track);
+      const removeWhenInactive = (): void => {
+        const timer = setTimeout(() => {
+          this.remoteTrackTimers.delete(track);
+          if (track.readyState === 'ended' || (this.activeRemoteTracks.has(track) && track.muted)) {
+            this.removeRemoteStream(participantId, stream);
+          }
+        }, 1500);
+        const previousTimer = this.remoteTrackTimers.get(track);
+        if (previousTimer) clearTimeout(previousTimer);
+        this.remoteTrackTimers.set(track, timer);
+      };
+      track.onended = () => this.removeRemoteStream(participantId, stream);
+      track.onmute = removeWhenInactive;
+      track.onunmute = () => {
+        this.activeRemoteTracks.add(track);
+        const timer = this.remoteTrackTimers.get(track);
+        if (timer) clearTimeout(timer);
+        this.remoteTrackTimers.delete(track);
+      };
+      this.emit({ type: 'remoteStream', participantId, stream });
+      console.log(`[WebRtcManager] Remote stream received from ${participantId}`);
+    };
+    peer.onnegotiationneeded = () => {
+      void this.createOffer(participantId);
+    };
+    this.addLocalTracks(peer);
+    peer.onconnectionstatechange = () => {
+      this.emit({
+        type: 'connectionStateChanged',
+        participantId,
+        state: peer.connectionState,
+      });
+      console.log(`[WebRtcManager] Peer ${participantId} connectionState: ${peer.connectionState}`);
+      if (peer.connectionState === 'failed' || peer.connectionState === 'closed') {
+        this.closePeer(participantId);
+      }
+    };
+    peer.oniceconnectionstatechange = () => {
+      this.emit({
+        type: 'iceConnectionStateChanged',
+        participantId,
+        state: peer.iceConnectionState,
+      });
+      console.log(`[WebRtcManager] Peer ${participantId} iceConnectionState: ${peer.iceConnectionState}`);
+      if (peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'closed') {
+        this.closePeer(participantId);
+      }
+    };
+    peer.onicegatheringstatechange = () => {
+      this.emit({
+        type: 'iceGatheringStateChanged',
+        participantId,
+        state: peer.iceGatheringState,
+      });
+      console.log(`[WebRtcManager] Peer ${participantId} iceGatheringState: ${peer.iceGatheringState}`);
+    };
+
+    this.peers.set(participantId, peer);
+    console.log(`[WebRtcManager] Peer created: ${participantId}`);
+    this.emit({ type: 'peerCreated', participantId });
+    return peer;
+  }
+
+  getPeer(participantId: string): RTCPeerConnection | undefined {
+    return this.peers.get(participantId);
+  }
+
+  /** Attach a local stream to all existing peers, without duplicate senders. */
+  setLocalStream(stream: MediaStream): void {
+    if (this.localStream === stream) return;
+    this.clearLocalStream();
+    this.localStream = stream;
+    for (const [participantId, peer] of this.peers) {
+      this.addLocalTracks(peer);
+      void this.createOffer(participantId);
+    }
+  }
+
+  /** Remove local tracks from peers without closing the peer connections. */
+  clearLocalStream(): void {
+    const stream = this.localStream;
+    if (!stream) return;
+    for (const peer of this.peers.values()) {
+      for (const sender of peer.getSenders()) {
+        if (sender.track && stream.getTracks().includes(sender.track)) {
+          peer.removeTrack(sender);
+        }
+      }
+    }
+    this.localStream = null;
+  }
+
+  getRemoteStream(participantId: string): MediaStream | undefined {
+    return this.remoteStreams.get(participantId);
+  }
+
+  getRemoteStreams(): ReadonlyMap<string, MediaStream> {
+    return this.remoteStreams;
+  }
+
+  on(listener: WebRtcManagerListener): void {
+    this.listeners.add(listener);
+  }
+
+  off(listener: WebRtcManagerListener): void {
+    this.listeners.delete(listener);
+  }
+
+  /** The host starts negotiation when a new participant joins. */
+  handleParticipantJoined(participant: Participant): void {
+    if (this.localIsHost && participant.id !== this.localParticipantId) {
+      void this.createOffer(participant.id);
+    }
+  }
+
+  async createOffer(participantId: string): Promise<void> {
+    if (!this.localRoomCode || !this.localParticipantId) return;
+
+    this.negotiationPending.add(participantId);
+    if (this.negotiating.has(participantId)) return;
+
+    const peer = this.getOrCreatePeer(participantId);
+    if (peer.signalingState !== 'stable') return;
+
+    this.negotiationPending.delete(participantId);
+    this.negotiating.add(participantId);
+    try {
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      const localDescription = peer.localDescription ?? offer;
+      const sent = this.socketClient.sendWebRtcOffer(
+        this.localRoomCode,
+        this.localParticipantId,
+        participantId,
+        localDescription,
+      );
+      if (!sent) throw new Error('Could not send WebRTC offer');
+      console.log(`[WebRtcManager] Offer created for ${participantId}`);
+    } catch (error) {
+      this.reportError(participantId, error);
+    } finally {
+      this.negotiating.delete(participantId);
+      if (this.negotiationPending.has(participantId) && peer.signalingState === 'stable') {
+        void this.createOffer(participantId);
+      }
+    }
+  }
+
+  private async handleOffer(message: WebRtcOfferMessage): Promise<void> {
+
+    if (!this.isMessageForLocalRoom(message.payload.roomCode, message.payload.targetId)) return;
+
+    const participantId = message.payload.participantId;
+
+    const peer = this.getOrCreatePeer(participantId);
+    const offerCollision = this.negotiating.has(participantId) || peer.signalingState !== 'stable';
+    const isPolite = this.isPolitePeer(participantId);
+    if (offerCollision && !isPolite) {
+      console.log(`[WebRtcManager] Ignoring colliding offer from ${participantId}`);
+      return;
+    }
+
+    try {
+      if (offerCollision) {
+        await peer.setLocalDescription({ type: 'rollback' });
+      }
+      await peer.setRemoteDescription(message.payload.sdp);
+      await this.flushPendingIceCandidates(participantId, peer);
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+      if (!this.localRoomCode || !this.localParticipantId) return;
+      const sent = this.socketClient.sendWebRtcAnswer(
+        this.localRoomCode,
+        this.localParticipantId,
+        participantId,
+        peer.localDescription ?? answer,
+      );
+      if (!sent) throw new Error('Could not send WebRTC answer');
+      console.log(`[WebRtcManager] Answer created for ${participantId}`);
+    } catch (error) {
+      this.reportError(participantId, error);
+    }
+  }
+
+  private async handleAnswer(message: WebRtcAnswerMessage): Promise<void> {
+    if (!this.isMessageForLocalRoom(message.payload.roomCode, message.payload.targetId)) return;
+
+    const participantId = message.payload.participantId;
+    const peer = this.getPeer(participantId);
+    if (!peer) {
+      this.reportError(participantId, new Error('Received answer for an unknown peer'));
+      return;
+    }
+
+    try {
+      await peer.setRemoteDescription(message.payload.sdp);
+      await this.flushPendingIceCandidates(participantId, peer);
+      console.log(`[WebRtcManager] Answer received from ${participantId}`);
+      if (this.negotiationPending.has(participantId)) {
+        void this.createOffer(participantId);
+      }
+    } catch (error) {
+      this.reportError(participantId, error);
+    }
+  }
+
+  private async handleIceCandidate(message: IceCandidateMessage): Promise<void> {
+    if (!this.isMessageForLocalRoom(message.payload.roomCode, message.payload.targetId)) return;
+
+    const participantId = message.payload.participantId;
+    const peer = this.getOrCreatePeer(participantId);
+    try {
+      if (peer.remoteDescription) {
+        await peer.addIceCandidate(message.payload.candidate);
+      } else {
+        const pending = this.pendingIceCandidates.get(participantId) ?? [];
+        pending.push(message.payload.candidate);
+        this.pendingIceCandidates.set(participantId, pending);
+      }
+      console.log(`[WebRtcManager] ICE candidate received from ${participantId}`);
+    } catch (error) {
+      this.reportError(participantId, error);
+    }
+  }
+
+  closePeer(participantId: string): void {
+    const peer = this.peers.get(participantId);
+    if (!peer) return;
+    peer.onicecandidate = null;
+    peer.ontrack = null;
+    peer.onnegotiationneeded = null;
+    peer.onconnectionstatechange = null;
+    peer.oniceconnectionstatechange = null;
+    peer.onicegatheringstatechange = null;
+    peer.close();
+    this.peers.delete(participantId);
+    this.pendingIceCandidates.delete(participantId);
+    this.negotiating.delete(participantId);
+    this.negotiationPending.delete(participantId);
+    const remoteStream = this.remoteStreams.get(participantId);
+    remoteStream?.getTracks().forEach((track) => {
+      const timer = this.remoteTrackTimers.get(track);
+      if (timer) clearTimeout(timer);
+      this.remoteTrackTimers.delete(track);
+      this.activeRemoteTracks.delete(track);
+      track.onended = null;
+      track.onmute = null;
+      track.onunmute = null;
+      track.stop();
+    });
+    this.remoteStreams.delete(participantId);
+    this.emit({ type: 'remoteStreamRemoved', participantId });
+    console.log(`[WebRtcManager] Peer closed: ${participantId}`);
+    this.emit({ type: 'peerClosed', participantId });
+  }
+
+  closeAllPeers(): void {
+    for (const participantId of [...this.peers.keys()]) {
+      this.closePeer(participantId);
+    }
+    this.pendingIceCandidates.clear();
+    this.negotiating.clear();
+    this.negotiationPending.clear();
+  }
+
+  dispose(): void {
+    this.clearLocalStream();
+    this.socketClient.off('webrtcOffer', this.handleOfferEvent);
+    this.socketClient.off('webrtcAnswer', this.handleAnswerEvent);
+    this.socketClient.off('iceCandidate', this.handleIceCandidateEvent);
+    this.socketListenersAttached = false;
+    this.closeAllPeers();
+    this.pendingSignals.length = 0;
+    this.localRoomCode = null;
+    this.localParticipantId = null;
+    this.listeners.clear();
+  }
+
+  private addLocalTracks(peer: RTCPeerConnection): void {
+    if (!this.localStream) return;
+    for (const track of this.localStream.getTracks()) {
+      const alreadyAdded = peer.getSenders().some((sender) => sender.track === track);
+      if (!alreadyAdded) {
+        peer.addTrack(track, this.localStream);
+      }
+    }
+  }
+
+  private async flushPendingIceCandidates(
+    participantId: string,
+    peer: RTCPeerConnection,
+  ): Promise<void> {
+    const pending = this.pendingIceCandidates.get(participantId);
+    if (!pending) return;
+    this.pendingIceCandidates.delete(participantId);
+    for (const candidate of pending) {
+      await peer.addIceCandidate(candidate);
+    }
+  }
+
+  private removeRemoteStream(participantId: string, stream: MediaStream): void {
+    if (this.remoteStreams.get(participantId) !== stream) return;
+    stream.getTracks().forEach((track) => {
+      const timer = this.remoteTrackTimers.get(track);
+      if (timer) clearTimeout(timer);
+      this.remoteTrackTimers.delete(track);
+      this.activeRemoteTracks.delete(track);
+      track.onended = null;
+      track.onmute = null;
+      track.onunmute = null;
+      track.stop();
+    });
+    this.remoteStreams.delete(participantId);
+    this.emit({ type: 'remoteStreamRemoved', participantId });
+  }
+
+  private sendIceCandidate(participantId: string, candidate: RTCIceCandidateInit): void {
+    if (!this.localRoomCode || !this.localParticipantId) return;
+    const sent = this.socketClient.sendIceCandidate(
+      this.localRoomCode,
+      this.localParticipantId,
+      participantId,
+      candidate,
+    );
+    if (sent) console.log(`[WebRtcManager] ICE candidate sent to ${participantId}`);
+  }
+
+  private enqueueOrHandleSignal(
+    signal: WebRtcOfferMessage | WebRtcAnswerMessage | IceCandidateMessage,
+  ): void {
+    if (!this.localRoomCode || !this.localParticipantId) {
+
+      this.pendingSignals.push(signal);
+      return;
+    }
+
+
+    switch (signal.type) {
+      case 'WEBRTC_OFFER':
+        void this.handleOffer(signal);
+        break;
+      case 'WEBRTC_ANSWER':
+        void this.handleAnswer(signal);
+        break;
+      case 'ICE_CANDIDATE':
+        void this.handleIceCandidate(signal);
+        break;
+    }
+  }
+
+  private isMessageForLocalRoom(roomCode: string, targetId: string): boolean {
+    return roomCode === this.localRoomCode && targetId === this.localParticipantId;
+  }
+
+  /** The lexicographically larger participant is polite during offer glare. */
+  private isPolitePeer(participantId: string): boolean {
+    return (this.localParticipantId ?? '') > participantId;
+  }
+
+  private reportError(participantId: string, error: unknown): void {
+    const normalizedError = error instanceof Error ? error : new Error(String(error));
+    console.error(`[WebRtcManager] Peer ${participantId} error:`, normalizedError);
+    this.emit({ type: 'error', participantId, error: normalizedError });
+  }
+
+  private emit(event: WebRtcManagerEvent): void {
+    this.onEvent?.(event);
+    this.listeners.forEach((listener) => listener(event));
+  }
+}

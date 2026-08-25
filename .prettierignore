@@ -1,0 +1,7 @@
+dist/
+node_modules/
+release/
+.package/
+*.log
+.env
+.env.local
