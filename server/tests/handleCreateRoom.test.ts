@@ -203,7 +203,7 @@ describe('CREATE_ROOM flow', () => {
     expect(roomManager.activeRoomCount).toBe(0);
   });
 
-  it('should not handle JOIN_ROOM yet', () => {
+  it('returns ROOM_NOT_FOUND when JOIN_ROOM references an unknown room', () => {
     const ws = createMockWs();
     const response = handleIncomingFrame(
       ws,
@@ -214,7 +214,10 @@ describe('CREATE_ROOM flow', () => {
       roomManager,
     );
 
-    expect(response).toBeNull();
+    expect(response?.type).toBe(SignalingMessageType.ERROR);
+    if (response?.type === SignalingMessageType.ERROR) {
+      expect(response.payload.code).toBe('ROOM_NOT_FOUND');
+    }
     expect(roomManager.activeRoomCount).toBe(0);
   });
 });

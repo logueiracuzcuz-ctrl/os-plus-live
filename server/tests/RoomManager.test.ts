@@ -93,13 +93,14 @@ describe('RoomManager', () => {
     expect(room.viewers.size).toBe(0);
   });
 
-  it('should remove room when host leaves and no viewers', () => {
+  it('keeps an empty room reusable when the host leaves', () => {
     const host = createMockClient({ isHost: true });
     roomManager.createRoom(host, 'ABC234');
 
     roomManager.removeClient(host.id);
 
-    expect(roomManager.activeRoomCount).toBe(0);
+    expect(roomManager.activeRoomCount).toBe(1);
+    expect(roomManager.getRoomByCode('ABC234')?.state).toBe(RoomState.WAITING);
   });
 
   it('should generate unique codes', () => {
@@ -138,12 +139,12 @@ describe('Room', () => {
     expect(room.viewers.size).toBe(ROOM_CONFIG.MAX_PARTICIPANTS);
   });
 
-  it('should close room when host is removed', () => {
+  it('returns to WAITING when host is removed', () => {
     const host = createMockClient({ isHost: true });
     const room = new Room(host, 'ABC234');
 
     room.removeClient(host.id);
-    expect(room.state).toBe(RoomState.CLOSED);
+    expect(room.state).toBe(RoomState.WAITING);
     expect(room.isEmpty()).toBe(true);
   });
 

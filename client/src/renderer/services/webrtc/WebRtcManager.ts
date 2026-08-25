@@ -23,15 +23,12 @@ export class WebRtcManager {
   private readonly peers = new Map<string, RTCPeerConnection>();
   private readonly pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>();
   private readonly remoteStreams = new Map<string, MediaStream>();
-  private readonly remoteTrackTimers = new Map<MediaStreamTrack, ReturnType<typeof setTimeout>>();
-  private readonly activeRemoteTracks = new Set<MediaStreamTrack>();
   private readonly negotiating = new Set<string>();
   private readonly negotiationPending = new Set<string>();
   private readonly pendingSignals: Array<WebRtcOfferMessage | WebRtcAnswerMessage | IceCandidateMessage> = [];
   private localStream: MediaStream | null = null;
   private localRoomCode: string | null = null;
   private localParticipantId: string | null = null;
-  private localIsHost = false;
 
   private readonly handleOfferEvent = (event: SocketEvent): void => {
     if (event.type === 'webrtcOffer') {
@@ -72,12 +69,11 @@ export class WebRtcManager {
   setLocalParticipant(
     roomCode: string | null,
     participantId: string | null,
-    isHost = false,
+    _isHost = false,
   ): void {
 
     this.localRoomCode = roomCode;
     this.localParticipantId = participantId;
-    this.localIsHost = isHost;
     if (!roomCode || !participantId) {
       this.pendingSignals.length = 0;
       this.closeAllPeers();
@@ -102,35 +98,22 @@ export class WebRtcManager {
       }
     };
     peer.ontrack = (event) => {
-      const stream = event.streams[0] ?? new MediaStream([event.track]);
       const track = event.track;
-      this.remoteStreams.set(participantId, stream);
-      if (!track.muted) this.activeRemoteTracks.add(track);
-      const removeWhenInactive = (): void => {
-        const timer = setTimeout(() => {
-          this.remoteTrackTimers.delete(track);
-          if (track.readyState === 'ended' || (this.activeRemoteTracks.has(track) && track.muted)) {
-            this.removeRemoteStream(participantId, stream);
-          }
-        }, 1500);
-        const previousTimer = this.remoteTrackTimers.get(track);
-        if (previousTimer) clearTimeout(previousTimer);
-        this.remoteTrackTimers.set(track, timer);
-      };
-      track.onended = () => this.removeRemoteStream(participantId, stream);
-      track.onmute = removeWhenInactive;
-      track.onunmute = () => {
-        this.activeRemoteTracks.add(track);
-        const timer = this.remoteTrackTimers.get(track);
-        if (timer) clearTimeout(timer);
-        this.remoteTrackTimers.delete(track);
-      };
+      let stream = this.remoteStreams.get(participantId);
+      if (!stream) {
+        stream = event.streams[0] ?? new MediaStream([track]);
+        this.remoteStreams.set(participantId, stream);
+      } else if (!stream.getTracks().includes(track)) {
+        stream.addTrack(track);
+      }
+      track.onended = () => this.removeRemoteTrack(participantId, stream, track);
       this.emit({ type: 'remoteStream', participantId, stream });
-      console.log(`[WebRtcManager] Remote stream received from ${participantId}`);
+      console.log(`[WebRtcManager] Remote stream received participantId=${participantId}`);
     };
     peer.onnegotiationneeded = () => {
       void this.createOffer(participantId);
     };
+    this.peers.set(participantId, peer);
     this.addLocalTracks(peer);
     peer.onconnectionstatechange = () => {
       this.emit({
@@ -138,7 +121,7 @@ export class WebRtcManager {
         participantId,
         state: peer.connectionState,
       });
-      console.log(`[WebRtcManager] Peer ${participantId} connectionState: ${peer.connectionState}`);
+      console.log(`[WebRTC] connectionState participantId=${participantId} state=${peer.connectionState}`);
       if (peer.connectionState === 'failed' || peer.connectionState === 'closed') {
         this.closePeer(participantId);
       }
@@ -149,7 +132,7 @@ export class WebRtcManager {
         participantId,
         state: peer.iceConnectionState,
       });
-      console.log(`[WebRtcManager] Peer ${participantId} iceConnectionState: ${peer.iceConnectionState}`);
+      console.log(`[WebRTC] iceConnectionState participantId=${participantId} state=${peer.iceConnectionState}`);
       if (peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'closed') {
         this.closePeer(participantId);
       }
@@ -160,11 +143,10 @@ export class WebRtcManager {
         participantId,
         state: peer.iceGatheringState,
       });
-      console.log(`[WebRtcManager] Peer ${participantId} iceGatheringState: ${peer.iceGatheringState}`);
+      console.log(`[WebRTC] iceGatheringState participantId=${participantId} state=${peer.iceGatheringState}`);
     };
 
-    this.peers.set(participantId, peer);
-    console.log(`[WebRtcManager] Peer created: ${participantId}`);
+    console.log(`[WebRTC] peer created participantId=${participantId}`);
     this.emit({ type: 'peerCreated', participantId });
     return peer;
   }
@@ -203,7 +185,7 @@ export class WebRtcManager {
   }
 
   getRemoteStreams(): ReadonlyMap<string, MediaStream> {
-    return this.remoteStreams;
+    return new Map(this.remoteStreams);
   }
 
   on(listener: WebRtcManagerListener): void {
@@ -214,9 +196,9 @@ export class WebRtcManager {
     this.listeners.delete(listener);
   }
 
-  /** The host starts negotiation when a new participant joins. */
+  /** Start one deterministic offer for each participant pair. */
   handleParticipantJoined(participant: Participant): void {
-    if (this.localIsHost && participant.id !== this.localParticipantId) {
+    if (participant.id !== this.localParticipantId && this.shouldInitiate(participant.id)) {
       void this.createOffer(participant.id);
     }
   }
@@ -243,7 +225,7 @@ export class WebRtcManager {
         localDescription,
       );
       if (!sent) throw new Error('Could not send WebRTC offer');
-      console.log(`[WebRtcManager] Offer created for ${participantId}`);
+      console.log(`[WebRTC] offer sent to=${participantId}`);
     } catch (error) {
       this.reportError(participantId, error);
     } finally {
@@ -284,7 +266,7 @@ export class WebRtcManager {
         peer.localDescription ?? answer,
       );
       if (!sent) throw new Error('Could not send WebRTC answer');
-      console.log(`[WebRtcManager] Answer created for ${participantId}`);
+      console.log(`[WebRTC] answer sent to=${participantId}`);
     } catch (error) {
       this.reportError(participantId, error);
     }
@@ -325,7 +307,7 @@ export class WebRtcManager {
         pending.push(message.payload.candidate);
         this.pendingIceCandidates.set(participantId, pending);
       }
-      console.log(`[WebRtcManager] ICE candidate received from ${participantId}`);
+      console.log(`[WebRTC] ICE candidate received from=${participantId}`);
     } catch (error) {
       this.reportError(participantId, error);
     }
@@ -346,19 +328,17 @@ export class WebRtcManager {
     this.negotiating.delete(participantId);
     this.negotiationPending.delete(participantId);
     const remoteStream = this.remoteStreams.get(participantId);
-    remoteStream?.getTracks().forEach((track) => {
-      const timer = this.remoteTrackTimers.get(track);
-      if (timer) clearTimeout(timer);
-      this.remoteTrackTimers.delete(track);
-      this.activeRemoteTracks.delete(track);
-      track.onended = null;
-      track.onmute = null;
-      track.onunmute = null;
-      track.stop();
-    });
-    this.remoteStreams.delete(participantId);
-    this.emit({ type: 'remoteStreamRemoved', participantId });
-    console.log(`[WebRtcManager] Peer closed: ${participantId}`);
+    if (remoteStream) {
+      remoteStream.getTracks().forEach((track) => {
+        track.onended = null;
+        track.onmute = null;
+        track.onunmute = null;
+        track.stop();
+      });
+      this.remoteStreams.delete(participantId);
+      this.emit({ type: 'remoteStreamRemoved', participantId });
+    }
+    console.log(`[WebRTC] peer closed participantId=${participantId}`);
     this.emit({ type: 'peerClosed', participantId });
   }
 
@@ -406,17 +386,20 @@ export class WebRtcManager {
     }
   }
 
-  private removeRemoteStream(participantId: string, stream: MediaStream): void {
+  private removeRemoteTrack(participantId: string, stream: MediaStream, track: MediaStreamTrack): void {
     if (this.remoteStreams.get(participantId) !== stream) return;
-    stream.getTracks().forEach((track) => {
-      const timer = this.remoteTrackTimers.get(track);
-      if (timer) clearTimeout(timer);
-      this.remoteTrackTimers.delete(track);
-      this.activeRemoteTracks.delete(track);
+    if (stream.getTracks().length > 1 && typeof stream.removeTrack === 'function') {
+      stream.removeTrack(track);
       track.onended = null;
-      track.onmute = null;
-      track.onunmute = null;
-      track.stop();
+      this.emit({ type: 'remoteStream', participantId, stream });
+      return;
+    }
+    track.onended = null;
+    stream.getTracks().forEach((remainingTrack) => {
+      remainingTrack.onended = null;
+      remainingTrack.onmute = null;
+      remainingTrack.onunmute = null;
+      remainingTrack.stop();
     });
     this.remoteStreams.delete(participantId);
     this.emit({ type: 'remoteStreamRemoved', participantId });
@@ -430,7 +413,7 @@ export class WebRtcManager {
       participantId,
       candidate,
     );
-    if (sent) console.log(`[WebRtcManager] ICE candidate sent to ${participantId}`);
+    if (sent) console.log(`[WebRTC] ICE candidate sent to=${participantId}`);
   }
 
   private enqueueOrHandleSignal(
@@ -460,9 +443,14 @@ export class WebRtcManager {
     return roomCode === this.localRoomCode && targetId === this.localParticipantId;
   }
 
+  /** The lexicographically smaller participant creates the initial offer. */
+  private shouldInitiate(participantId: string): boolean {
+    return (this.localParticipantId ?? '') < participantId;
+  }
+
   /** The lexicographically larger participant is polite during offer glare. */
   private isPolitePeer(participantId: string): boolean {
-    return (this.localParticipantId ?? '') > participantId;
+    return !this.shouldInitiate(participantId);
   }
 
   private reportError(participantId: string, error: unknown): void {

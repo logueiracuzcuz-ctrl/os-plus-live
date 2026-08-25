@@ -168,6 +168,11 @@ export function StateProvider({ children }: { children: ReactNode }): React.JSX.
     };
     const handleRoomJoined = (event: SocketEvent): void => {
       if (event.type === 'roomJoined') {
+        const { roomCode, participantId, participants } = event.payload.data.payload;
+        webRtcManager.setLocalParticipant(roomCode, participantId, false);
+        participants.forEach((participant) => {
+          webRtcManager.handleParticipantJoined(participant);
+        });
         console.log('[AppContext] Room joined:', event.payload.data);
       }
     };

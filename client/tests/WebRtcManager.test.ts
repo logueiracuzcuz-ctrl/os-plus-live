@@ -59,6 +59,7 @@ class FakePeerConnection {
   localDescription: RTCSessionDescription | null = null;
   remoteDescription: RTCSessionDescription | null = null;
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
+  onnegotiationneeded: (() => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
   addedCandidates: RTCIceCandidateInit[] = [];
@@ -88,11 +89,15 @@ class FakePeerConnection {
     this.addedTracks.push(track);
     const sender = { track } as RTCRtpSender;
     this.senders.push(sender);
+    this.onnegotiationneeded?.();
     return sender;
   }
   removeTrack(sender: RTCRtpSender): void {
     const index = this.senders.indexOf(sender);
-    if (index >= 0) this.senders.splice(index, 1);
+    if (index >= 0) {
+      this.senders.splice(index, 1);
+      this.onnegotiationneeded?.();
+    }
   }
   close(): void { this.closed = true; this.connectionState = 'closed'; }
 }
@@ -172,6 +177,90 @@ describe('WebRtcManager', () => {
     expect(manager.getRemoteStream('remote')).toBe(remoteStream);
     manager.closePeer('remote');
     expect(manager.getRemoteStream('remote')).toBeUndefined();
+    manager.dispose();
+  });
+
+  it('keeps independent remote streams for multiple participants', () => {
+    const socket = new FakeSocketClient();
+    const peers = new Map<string, FakePeerConnection>();
+    const manager = new WebRtcManager(socket, {
+      peerConnectionFactory: () => {
+        const peer = new FakePeerConnection();
+        return peer as unknown as RTCPeerConnection;
+      },
+    });
+    manager.setLocalParticipant('ROOM01', 'local', false);
+
+    for (const participantId of ['participant-a', 'participant-b', 'participant-c']) {
+      const peer = manager.getOrCreatePeer(participantId) as unknown as FakePeerConnection & {
+        ontrack: ((event: RTCTrackEvent) => void) | null;
+      };
+      peers.set(participantId, peer);
+      const track = { onended: null, stop: jest.fn() } as unknown as MediaStreamTrack;
+      const stream = { getTracks: () => [track] } as unknown as MediaStream;
+      peer.ontrack?.({ track, streams: [stream] } as unknown as RTCTrackEvent);
+      expect(manager.getRemoteStream(participantId)).toBe(stream);
+    }
+
+    expect(manager.getRemoteStreams().size).toBe(3);
+    expect(manager.getRemoteStream('participant-a')).not.toBe(manager.getRemoteStream('participant-b'));
+    manager.closePeer('participant-b');
+    expect(manager.getRemoteStream('participant-a')).toBeDefined();
+    expect(manager.getRemoteStream('participant-c')).toBeDefined();
+    expect(manager.getRemoteStream('participant-b')).toBeUndefined();
+    manager.dispose();
+  });
+
+  it('renegotiates when sharing starts, stops, and starts again', async () => {
+    const socket = new FakeSocketClient();
+    const peer = new FakePeerConnection();
+    const manager = new WebRtcManager(socket, {
+      peerConnectionFactory: () => peer as unknown as RTCPeerConnection,
+    });
+    manager.setLocalParticipant('ROOM01', 'a', false);
+    manager.getOrCreatePeer('b');
+    await waitForMicrotasks();
+    socket.sent.length = 0;
+
+    const firstTrack = {} as MediaStreamTrack;
+    manager.setLocalStream({ getTracks: () => [firstTrack] } as unknown as MediaStream);
+    await waitForMicrotasks();
+    expect(peer.addedTracks).toContain(firstTrack);
+    expect(socket.sent.filter((message) => message.type === SignalingMessageType.WEBRTC_OFFER)).toHaveLength(1);
+    peer.signalingState = 'stable';
+
+    manager.clearLocalStream();
+    await waitForMicrotasks();
+    const secondTrack = {} as MediaStreamTrack;
+    manager.setLocalStream({ getTracks: () => [secondTrack] } as unknown as MediaStream);
+    await waitForMicrotasks();
+    expect(peer.addedTracks).toContain(secondTrack);
+    expect(socket.sent.filter((message) => message.type === SignalingMessageType.WEBRTC_OFFER).length).toBeGreaterThanOrEqual(2);
+    manager.dispose();
+  });
+
+  it('uses one deterministic offer initiator for each participant pair', async () => {
+    const socket = new FakeSocketClient();
+    const peers: FakePeerConnection[] = [];
+    const manager = new WebRtcManager(socket, {
+      peerConnectionFactory: () => {
+        const peer = new FakePeerConnection();
+        peers.push(peer);
+        return peer as unknown as RTCPeerConnection;
+      },
+    });
+    manager.setLocalParticipant('ROOM01', 'participant-b', false);
+
+    manager.handleParticipantJoined({ ...participant, id: 'participant-a' });
+    manager.handleParticipantJoined({ ...participant, id: 'participant-c' });
+    await waitForMicrotasks();
+
+    expect(peers).toHaveLength(1);
+    expect(socket.sent).toHaveLength(1);
+    expect(socket.sent[0]).toMatchObject({
+      type: SignalingMessageType.WEBRTC_OFFER,
+      payload: { targetId: 'participant-c' },
+    });
     manager.dispose();
   });
 
