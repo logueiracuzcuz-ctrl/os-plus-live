@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import type { Participant } from '../../types';
 import { useScreenCapture, useWebRtcManager } from '../../state/AppContext';
@@ -19,7 +19,7 @@ interface SelectedVideoProps {
   onToggleFocus: () => void;
 }
 
-function SelectedVideo({ stream, participantName, isFocused, onToggleFocus }: SelectedVideoProps): React.JSX.Element {
+const SelectedVideo = memo(function SelectedVideo({ stream, participantName, isFocused, onToggleFocus }: SelectedVideoProps): React.JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -53,7 +53,7 @@ function SelectedVideo({ stream, participantName, isFocused, onToggleFocus }: Se
       </button>
     </div>
   );
-}
+});
 
 /** Main room view: one selected participant stream and a clickable participant list. */
 export function RoomMediaView({ participants, currentUserId }: RoomMediaViewProps): React.JSX.Element {
@@ -102,6 +102,7 @@ export function RoomMediaView({ participants, currentUserId }: RoomMediaViewProp
   }, [screenCapture]);
 
   const selectedParticipant = participants.find((participant) => participant.id === selectedParticipantId);
+  const toggleFocus = useCallback(() => setIsFocused((focused) => !focused), []);
   const selectedStream = selectedParticipantId === currentUserId
     ? localStream
     : selectedParticipantId ? remoteStreams.get(selectedParticipantId) ?? null : null;
@@ -118,7 +119,7 @@ export function RoomMediaView({ participants, currentUserId }: RoomMediaViewProp
               stream={selectedStream}
               participantName={selectedParticipant.displayName}
               isFocused={isFocused}
-              onToggleFocus={() => setIsFocused((focused) => !focused)}
+              onToggleFocus={toggleFocus}
             />
           : <VideoPlaceholder />}
       </div>

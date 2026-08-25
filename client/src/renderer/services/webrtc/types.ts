@@ -31,6 +31,20 @@ export type WebRtcManagerEvent =
 
 export type WebRtcManagerListener = (event: WebRtcManagerEvent) => void;
 
+/** Lightweight outbound/inbound metrics collected on demand from a peer. */
+export interface WebRtcPeerStats {
+  participantId: string;
+  bytesSent: number;
+  bytesReceived: number;
+  packetsLost: number;
+  framesEncoded: number;
+  framesDecoded: number;
+  framesDropped: number;
+  framesPerSecond?: number;
+  jitter?: number;
+  roundTripTime?: number;
+}
+
 export interface WebRtcManagerConfig {
   rtcConfiguration?: RTCConfiguration;
   peerConnectionFactory?: (configuration?: RTCConfiguration) => RTCPeerConnection;

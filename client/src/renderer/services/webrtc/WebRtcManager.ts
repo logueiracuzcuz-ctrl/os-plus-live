@@ -5,7 +5,14 @@ import type {
 } from '@screenshare/shared';
 import type { SocketEvent } from '../socket';
 import type { ISocketClient, Participant } from '../../types';
-import type { WebRtcManagerConfig, WebRtcManagerEvent, WebRtcManagerListener } from './types';
+import type {
+  WebRtcManagerConfig,
+  WebRtcManagerEvent,
+  WebRtcManagerListener,
+  WebRtcPeerStats,
+} from './types';
+
+const MAX_RECOMMENDED_MESH_PEERS = 4;
 
 /**
  * Owns one RTCPeerConnection per remote participant.
@@ -147,12 +154,67 @@ export class WebRtcManager {
     };
 
     console.log(`[WebRTC] peer created participantId=${participantId}`);
+    if (this.peers.size === MAX_RECOMMENDED_MESH_PEERS + 1) {
+      console.warn(`[Performance] peerCount=${this.peers.size}; mesh may impact CPU and upload bandwidth`);
+    }
     this.emit({ type: 'peerCreated', participantId });
     return peer;
   }
 
   getPeer(participantId: string): RTCPeerConnection | undefined {
     return this.peers.get(participantId);
+  }
+
+  getPeerCount(): number {
+    return this.peers.size;
+  }
+
+  /** Collect lightweight diagnostics without starting a polling loop. */
+  async getPeerStats(participantId: string): Promise<WebRtcPeerStats | undefined> {
+    const peer = this.peers.get(participantId);
+    if (!peer) return undefined;
+
+    const stats = await peer.getStats();
+    const result: WebRtcPeerStats = {
+      participantId,
+      bytesSent: 0,
+      bytesReceived: 0,
+      packetsLost: 0,
+      framesEncoded: 0,
+      framesDecoded: 0,
+      framesDropped: 0,
+    };
+    for (const report of stats.values()) {
+      const entry = report as unknown as {
+        type: string;
+        state?: string;
+        bytesSent?: number;
+        bytesReceived?: number;
+        packetsLost?: number;
+        framesEncoded?: number;
+        framesDecoded?: number;
+        framesDropped?: number;
+        framesPerSecond?: number;
+        jitter?: number;
+        roundTripTime?: number;
+      };
+      if (entry.type === 'outbound-rtp') {
+        result.bytesSent += entry.bytesSent ?? 0;
+        result.framesEncoded += entry.framesEncoded ?? 0;
+        result.framesPerSecond ??= entry.framesPerSecond;
+      } else if (entry.type === 'inbound-rtp') {
+        result.bytesReceived += entry.bytesReceived ?? 0;
+        result.packetsLost += entry.packetsLost ?? 0;
+        result.framesDecoded += entry.framesDecoded ?? 0;
+        result.framesDropped += entry.framesDropped ?? 0;
+        result.framesPerSecond ??= entry.framesPerSecond;
+        result.jitter ??= entry.jitter;
+      } else if (entry.type === 'candidate-pair' && entry.state === 'succeeded') {
+        result.roundTripTime ??= entry.roundTripTime;
+      }
+    }
+    console.info(`[Performance] participantId=${participantId}`, result);
+    return result;
   }
 
   /** Attach a local stream to all existing peers, without duplicate senders. */
@@ -369,9 +431,30 @@ export class WebRtcManager {
     for (const track of this.localStream.getTracks()) {
       const alreadyAdded = peer.getSenders().some((sender) => sender.track === track);
       if (!alreadyAdded) {
-        peer.addTrack(track, this.localStream);
+        const sender = peer.addTrack(track, this.localStream);
+        this.configureSender(sender, track);
       }
     }
+  }
+
+  private configureSender(sender: RTCRtpSender, track: MediaStreamTrack): void {
+    if ('contentHint' in track) {
+      track.contentHint = 'detail';
+    }
+    if (typeof sender.getParameters !== 'function' || typeof sender.setParameters !== 'function') return;
+
+    const parameters = sender.getParameters();
+    const settings = typeof track.getSettings === 'function' ? track.getSettings() : {};
+    const maxBitrate = settings.width && settings.width > 1280 ? 4_000_000 : 2_500_000;
+    const encoding = parameters.encodings?.[0] ?? {};
+    parameters.encodings = [{
+      ...encoding,
+      maxBitrate,
+      ...(settings.frameRate ? { maxFramerate: settings.frameRate } : {}),
+    }];
+    void sender.setParameters(parameters).catch((error: unknown) => {
+      console.warn('[WebRTC] Sender parameters unavailable:', error);
+    });
   }
 
   private async flushPendingIceCandidates(

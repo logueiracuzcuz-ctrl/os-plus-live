@@ -63,6 +63,7 @@ class FakePeerConnection {
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
   addedCandidates: RTCIceCandidateInit[] = [];
+  readonly stats = new Map<string, object>();
   readonly senders: RTCRtpSender[] = [];
   addedTracks: MediaStreamTrack[] = [];
   closed = false;
@@ -84,6 +85,7 @@ class FakePeerConnection {
     this.signalingState = description.type === 'offer' ? 'have-remote-offer' : 'stable';
   }
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> { this.addedCandidates.push(candidate); }
+  async getStats(): Promise<RTCStatsReport> { return this.stats as unknown as RTCStatsReport; }
   getSenders(): RTCRtpSender[] { return this.senders; }
   addTrack(track: MediaStreamTrack): RTCRtpSender {
     this.addedTracks.push(track);
@@ -236,6 +238,33 @@ describe('WebRtcManager', () => {
     await waitForMicrotasks();
     expect(peer.addedTracks).toContain(secondTrack);
     expect(socket.sent.filter((message) => message.type === SignalingMessageType.WEBRTC_OFFER).length).toBeGreaterThanOrEqual(2);
+    manager.dispose();
+  });
+
+  it('aggregates peer stats on demand without starting a polling timer', async () => {
+    const socket = new FakeSocketClient();
+    const peer = new FakePeerConnection();
+    peer.stats.set('outbound', { type: 'outbound-rtp', bytesSent: 1000, framesEncoded: 20, framesPerSecond: 30 });
+    peer.stats.set('inbound', { type: 'inbound-rtp', bytesReceived: 2000, packetsLost: 2, framesDecoded: 18, framesDropped: 1, jitter: 0.02 });
+    peer.stats.set('candidate', { type: 'candidate-pair', state: 'succeeded', roundTripTime: 0.04 });
+    const manager = new WebRtcManager(socket, {
+      peerConnectionFactory: () => peer as unknown as RTCPeerConnection,
+    });
+    manager.setLocalParticipant('ROOM01', 'local', false);
+    manager.getOrCreatePeer('remote');
+
+    await expect(manager.getPeerStats('remote')).resolves.toMatchObject({
+      participantId: 'remote',
+      bytesSent: 1000,
+      bytesReceived: 2000,
+      packetsLost: 2,
+      framesEncoded: 20,
+      framesDecoded: 18,
+      framesDropped: 1,
+      framesPerSecond: 30,
+      jitter: 0.02,
+      roundTripTime: 0.04,
+    });
     manager.dispose();
   });
 
