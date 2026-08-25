@@ -5,7 +5,9 @@ import path from 'path';
 export default defineConfig({
   plugins: [react()],
   root: path.resolve(__dirname, 'src/renderer'),
-  base: './',
+  envDir: __dirname,
+  // Electron loads the renderer from the filesystem; Vercel serves it from a URL.
+  base: process.env.VERCEL ? '/' : './',
   build: {
     outDir: path.resolve(__dirname, 'dist/renderer'),
     emptyOutDir: true,

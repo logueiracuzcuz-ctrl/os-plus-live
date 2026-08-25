@@ -12,6 +12,8 @@ export interface ScreenCaptureSettings {
   audio: AudioSource;
 }
 
+export type ScreenCapturePlatform = 'electron' | 'browser';
+
 export type ScreenCaptureState = 'idle' | 'capturing';
 
 export type ScreenCaptureEvent =

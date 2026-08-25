@@ -73,6 +73,39 @@ describe('ScreenCaptureService', () => {
     service.dispose();
   });
 
+  it('uses browser display capture when Electron APIs are unavailable', async () => {
+    const capture = createFakeCapture();
+    let requestedConstraints: DisplayMediaStreamOptions | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {},
+    });
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          getDisplayMedia: async (constraints: DisplayMediaStreamOptions) => {
+            requestedConstraints = constraints;
+            return capture.stream as MediaStream;
+          },
+        },
+      },
+    });
+
+    const service = new ScreenCaptureService();
+    const stream = await service.startCapture(null, { quality: '1080p', frameRate: 30, audio: 'off' });
+
+    expect(service.getPlatform()).toBe('browser');
+    expect(stream).toBe(capture.stream);
+    expect(requestedConstraints?.audio).toBe(false);
+    expect(requestedConstraints?.video).toEqual({
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 30, max: 30 },
+    });
+    service.dispose();
+  });
+
   it('lists sources, stores one stream, and stops it when the track ends', async () => {
     const capture = createFakeCapture();
     let getUserMediaCalls = 0;

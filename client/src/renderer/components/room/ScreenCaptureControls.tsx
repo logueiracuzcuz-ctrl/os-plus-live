@@ -8,6 +8,7 @@ import type { ScreenCaptureEvent, ScreenSource } from '../../services/screen';
 export function ScreenCaptureControls(): React.JSX.Element {
   const screenCapture = useScreenCapture();
   const { transmission } = useAppState();
+  const isElectron = screenCapture?.getPlatform() === 'electron';
   const [sources, setSources] = useState<ScreenSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState('');
   const [isCapturing, setIsCapturing] = useState(() => screenCapture?.isCapturing() ?? false);
@@ -57,19 +58,25 @@ export function ScreenCaptureControls(): React.JSX.Element {
       <TransmissionSettingsPanel />
       <div className="screen-capture-controls">
         <label htmlFor="screen-source">Fonte de captura</label>
-        <select
-          id="screen-source"
-          value={selectedSourceId}
-          onChange={(event) => setSelectedSourceId(event.target.value)}
-          disabled={isCapturing}
-        >
-          <option value="">Selecionar tela ou janela</option>
-          {sources.map((source) => (
-            <option key={source.id} value={source.id}>
-              {source.type === 'screen' ? 'Tela' : 'Janela'}: {source.name}
-            </option>
-          ))}
-        </select>
+        {isElectron ? (
+          <select
+            id="screen-source"
+            value={selectedSourceId}
+            onChange={(event) => setSelectedSourceId(event.target.value)}
+            disabled={isCapturing}
+          >
+            <option value="">Selecionar tela ou janela</option>
+            {sources.map((source) => (
+              <option key={source.id} value={source.id}>
+                {source.type === 'screen' ? 'Tela' : 'Janela'}: {source.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <p className="screen-capture-controls__browser-hint">
+            O navegador exibirá a seleção de tela, janela ou aba ao iniciar.
+          </p>
+        )}
         {captureError && <p role="alert">{captureError}</p>}
         <div className="room-content__actions">
           <Button variant="primary" size="lg" onClick={handleToggleCapture} fullWidth>

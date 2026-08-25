@@ -13,6 +13,19 @@ import { createRtcConfiguration, WebRtcManager, type IceEnvironment } from '../s
 import { ScreenCaptureService } from '../services/screen';
 import type { ScreenCaptureEvent } from '../services/screen';
 
+interface ClientViteEnvironment {
+  readonly VITE_WS_URL?: string;
+  readonly PROD?: boolean;
+}
+
+const PRODUCTION_WS_URL = 'wss://screenshareserver-production-d3ab.up.railway.app';
+
+function getSignalingServerUrl(): string {
+  const environment = (import.meta as ImportMeta & { env?: ClientViteEnvironment }).env ?? {};
+  return environment.VITE_WS_URL?.trim()
+    || (environment.PROD ? PRODUCTION_WS_URL : CLIENT_CONFIG.DEFAULT_SERVER_URL);
+}
+
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'NAVIGATE':
@@ -86,7 +99,7 @@ export function StateProvider({ children }: { children: ReactNode }): React.JSX.
 
   const [socketClient] = useState(
     () => new SocketClient({
-      serverUrl: CLIENT_CONFIG.DEFAULT_SERVER_URL,
+      serverUrl: getSignalingServerUrl(),
       reconnectInterval: CLIENT_CONFIG.RECONNECT_BASE_DELAY_MS,
       maxReconnectAttempts: CLIENT_CONFIG.MAX_RECONNECT_ATTEMPTS,
       connectionTimeout: CLIENT_CONFIG.CONNECTION_TIMEOUT_MS,

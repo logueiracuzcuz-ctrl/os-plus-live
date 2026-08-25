@@ -1,6 +1,7 @@
 import type {
   ScreenCaptureEvent,
   ScreenCaptureListener,
+  ScreenCapturePlatform,
   ScreenCaptureSettings,
   ScreenCaptureState,
   ScreenSource,
@@ -10,6 +11,10 @@ const QUALITY_DIMENSIONS = {
   '720p': { width: 1280, height: 720 },
   '1080p': { width: 1920, height: 1080 },
 } as const;
+
+type ElectronCaptureApi = {
+  listScreenSources?: () => Promise<ScreenSource[]>;
+};
 
 function getAudioTracks(stream: MediaStream): MediaStreamTrack[] {
   return typeof stream.getAudioTracks === 'function' ? stream.getAudioTracks() : [];
@@ -54,11 +59,20 @@ export class ScreenCaptureService {
     }
   }
 
+  getPlatform(): ScreenCapturePlatform {
+    const electronApi = (window as Window & { electronAPI?: ElectronCaptureApi }).electronAPI;
+    return typeof electronApi?.listScreenSources === 'function' ? 'electron' : 'browser';
+  }
+
   async startCapture(
     selectedSource: ScreenSource | null = null,
     settings: ScreenCaptureSettings = { quality: '1080p', frameRate: 30, audio: 'off' },
   ): Promise<MediaStream> {
     if (this.stream) return this.stream;
+
+    if (this.getPlatform() === 'browser') {
+      return this.startBrowserCapture(settings);
+    }
 
     const acquiredStreams: MediaStream[] = [];
 
@@ -137,22 +151,7 @@ export class ScreenCaptureService {
           console.warn(`[ScreenCaptureService] Could not combine audio tracks: ${normalizedError.message}`);
         }
       }
-      const videoTracks = stream.getVideoTracks();
-      if (videoTracks.length === 0) {
-        stream.getTracks().forEach((track) => track.stop());
-        throw new Error('Screen capture returned no video track');
-      }
-
-      this.stream = stream;
-      this.source = selectedSource;
-      this.state = 'capturing';
-      videoTracks.forEach((track) => {
-        track.onended = () => this.stopCapture('track-ended');
-      });
-      this.emit({ type: 'started', stream, source: selectedSource });
-      this.logAppliedSettings(stream, settings);
-      console.log('[ScreenCaptureService] Capture started');
-      return stream;
+      return this.activateStream(stream, selectedSource, settings);
     } catch (error) {
       acquiredStreams.forEach((acquiredStream) => {
         acquiredStream.getTracks().forEach((track) => track.stop());
@@ -161,6 +160,77 @@ export class ScreenCaptureService {
       this.emit({ type: 'error', error: normalizedError });
       throw normalizedError;
     }
+  }
+
+  private async startBrowserCapture(settings: ScreenCaptureSettings): Promise<MediaStream> {
+    const acquiredStreams: MediaStream[] = [];
+    try {
+      const dimensions = QUALITY_DIMENSIONS[settings.quality];
+      const wantsSystemAudio = settings.audio === 'system' || settings.audio === 'both';
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: { ideal: dimensions.width },
+          height: { ideal: dimensions.height },
+          frameRate: { ideal: settings.frameRate, max: settings.frameRate },
+        },
+        audio: wantsSystemAudio,
+      });
+      acquiredStreams.push(displayStream);
+      const audioTracks = getAudioTracks(displayStream);
+      if (settings.audio === 'microphone' || settings.audio === 'both') {
+        try {
+          const microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          acquiredStreams.push(microphoneStream);
+          audioTracks.push(...getAudioTracks(microphoneStream));
+        } catch (error) {
+          const normalizedError = this.normalizeError(error);
+          console.warn(`[ScreenCaptureService] Microphone unavailable: ${normalizedError.message}`);
+        }
+      }
+
+      let stream = displayStream;
+      if (audioTracks.length > getAudioTracks(displayStream).length) {
+        try {
+          stream = new MediaStream([...displayStream.getVideoTracks(), ...audioTracks]);
+        } catch (error) {
+          const microphoneTracks = audioTracks.filter((track) => !getAudioTracks(displayStream).includes(track));
+          microphoneTracks.forEach((track) => track.stop());
+          const normalizedError = this.normalizeError(error);
+          console.warn(`[ScreenCaptureService] Could not combine browser audio tracks: ${normalizedError.message}`);
+        }
+      }
+      return this.activateStream(stream, null, settings);
+    } catch (error) {
+      acquiredStreams.forEach((acquiredStream) => {
+        acquiredStream.getTracks().forEach((track) => track.stop());
+      });
+      const normalizedError = this.normalizeError(error);
+      this.emit({ type: 'error', error: normalizedError });
+      throw normalizedError;
+    }
+  }
+
+  private activateStream(
+    stream: MediaStream,
+    source: ScreenSource | null,
+    settings: ScreenCaptureSettings,
+  ): MediaStream {
+    const videoTracks = stream.getVideoTracks();
+    if (videoTracks.length === 0) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error('Screen capture returned no video track');
+    }
+
+    this.stream = stream;
+    this.source = source;
+    this.state = 'capturing';
+    videoTracks.forEach((track) => {
+      track.onended = () => this.stopCapture('track-ended');
+    });
+    this.emit({ type: 'started', stream, source });
+    this.logAppliedSettings(stream, settings);
+    console.log(`[ScreenCaptureService] ${this.getPlatform()} capture started`);
+    return stream;
   }
 
   getStream(): MediaStream | null {

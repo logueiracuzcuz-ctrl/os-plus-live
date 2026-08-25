@@ -3,6 +3,7 @@ export type {
   ScreenCaptureEvent,
   ScreenCaptureListener,
   ScreenCaptureState,
+  ScreenCapturePlatform,
   ScreenCaptureSettings,
   ScreenSource,
 } from './types';
