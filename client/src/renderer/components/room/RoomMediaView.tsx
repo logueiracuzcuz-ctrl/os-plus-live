@@ -29,6 +29,7 @@ const SelectedVideo = memo(function SelectedVideo({ participantId, stream, parti
     if (video.srcObject !== stream) {
       video.srcObject = stream;
     }
+    console.log(`[WebRTC UI STREAM] selectedParticipantId=${participantId} streamParticipantId=${participantId} streamId=${stream.id} videoSrcObject=${video.srcObject ? 'set' : 'null'} readyState=${video.readyState} paused=${video.paused}`);
     void video.play().then(() => {
       console.log(`[UI] stream attached participantId=${participantId}`);
     }).catch(() => {
@@ -85,6 +86,7 @@ export function RoomMediaView({ participants, currentUserId }: RoomMediaViewProp
     setRemoteStreams(new Map(webRtcManager.getRemoteStreams()));
     const handleManagerEvent = (event: WebRtcManagerEvent): void => {
       if (event.type === 'remoteStream') {
+        console.log(`[WebRTC UI] remote stream available participantId=${event.participantId} streamExists=true`);
         setRemoteStreams((current) => new Map(current).set(event.participantId, event.stream));
       } else if (event.type === 'remoteStreamRemoved') {
         setRemoteStreams((current) => {
@@ -116,8 +118,9 @@ export function RoomMediaView({ participants, currentUserId }: RoomMediaViewProp
     : selectedParticipantId ? remoteStreams.get(selectedParticipantId) ?? null : null;
 
   useEffect(() => {
+    console.log(`[WebRTC UI] selectedParticipant=${selectedParticipantId ?? 'none'} streamParticipantId=${selectedParticipantId ?? 'none'} streamExists=${Boolean(selectedStream)}`);
     if (!selectedStream) setIsFocused(false);
-  }, [selectedStream]);
+  }, [selectedParticipantId, selectedStream]);
 
   return (
     <section className={`room-media-view${isFocused ? ' room-media-view--focused' : ''}`} aria-label="Visualização da sala">

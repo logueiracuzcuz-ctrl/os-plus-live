@@ -105,6 +105,7 @@ export class WebRtcManager {
     const peer = this.peerConnectionFactory(this.rtcConfiguration);
     peer.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log(`[WebRTC ICE] candidate sent from=${this.localParticipantId ?? 'unknown'} to=${participantId}`);
         this.sendIceCandidate(participantId, event.candidate.toJSON());
       }
     };
@@ -121,6 +122,7 @@ export class WebRtcManager {
       }
       track.onended = () => this.removeRemoteTrack(participantId, stream, track);
       this.emit({ type: 'remoteStream', participantId, stream });
+      this.logPeerMediaState(participantId, peer);
       console.log(`[WebRTC] track received participantId=${participantId} kind=${track.kind}`);
       console.log(`[WebRTC] remote stream available participantId=${participantId}`);
     };
@@ -163,7 +165,10 @@ export class WebRtcManager {
         participantId,
         state: peer.iceGatheringState,
       });
-      console.log(`[WebRTC STATE] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} connection=${peer.connectionState} ice=${peer.iceConnectionState} signaling=${peer.signalingState}`);
+      console.log(`[WebRTC STATE] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} connection=${peer.connectionState} ice=${peer.iceConnectionState} signaling=${peer.signalingState} gathering=${peer.iceGatheringState}`);
+    };
+    peer.onsignalingstatechange = () => {
+      console.log(`[WebRTC STATE] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} connection=${peer.connectionState} ice=${peer.iceConnectionState} signaling=${peer.signalingState} gathering=${peer.iceGatheringState}`);
     };
 
     console.log(`[WebRTC] peer created participantId=${participantId}`);
@@ -315,6 +320,7 @@ export class WebRtcManager {
         return;
       }
       const localDescription = peer.localDescription ?? offer;
+      this.logDescriptionSummary(participantId, 'offer', localDescription);
       const sent = this.socketClient.sendWebRtcOffer(
         this.localRoomCode,
         this.localParticipantId,
@@ -364,10 +370,13 @@ export class WebRtcManager {
         console.log(`[WebRTC] rollback participantId=${participantId}`);
       }
       await peer.setRemoteDescription(message.payload.sdp);
+      this.logDescriptionSummary(participantId, 'remote-offer', message.payload.sdp);
+      this.logPeerMediaState(participantId, peer);
       console.log(`[WebRTC] remote description set participantId=${participantId}`);
       await this.flushPendingIceCandidates(participantId, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
+      this.logDescriptionSummary(participantId, 'answer', peer.localDescription ?? answer);
       if (!this.localRoomCode || !this.localParticipantId) return;
       const sent = this.socketClient.sendWebRtcAnswer(
         this.localRoomCode,
@@ -399,6 +408,8 @@ export class WebRtcManager {
     try {
       this.settingRemoteAnswer.add(participantId);
       await peer.setRemoteDescription(message.payload.sdp);
+      this.logDescriptionSummary(participantId, 'remote-answer', message.payload.sdp);
+      this.logPeerMediaState(participantId, peer);
       this.settingRemoteAnswer.delete(participantId);
       this.negotiating.delete(participantId);
       console.log(`[WebRTC DEBUG] localParticipantId=${this.localParticipantId} remoteParticipantId=${participantId} signaling message sender=${participantId} target=${this.localParticipantId} peer selected for message=${participantId}`);
@@ -443,6 +454,7 @@ export class WebRtcManager {
     peer.onconnectionstatechange = null;
     peer.oniceconnectionstatechange = null;
     peer.onicegatheringstatechange = null;
+    peer.onsignalingstatechange = null;
     peer.close();
     this.peers.delete(participantId);
     this.pendingIceCandidates.delete(participantId);
@@ -505,6 +517,25 @@ export class WebRtcManager {
     }
     const senderDetails = peer.getSenders().map((sender) => `${sender.track?.kind ?? 'none'}:${sender.track?.id ?? 'none'}:${sender.track?.readyState ?? 'none'}`).join(',');
     console.log(`[WebRTC SENDERS] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} senders=${senderDetails}`);
+  }
+
+  private logDescriptionSummary(
+    participantId: string,
+    label: string,
+    description: RTCSessionDescriptionInit | RTCSessionDescription,
+  ): void {
+    const sdp = description.sdp ?? '';
+    const videoSection = sdp.split('m=video')[1]?.split('m=')[0] ?? '';
+    const direction = videoSection.match(/a=(sendrecv|sendonly|recvonly|inactive)/)?.[1] ?? 'unknown';
+    console.log(`[WebRTC SDP] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} ${label} offerHasVideo=${label.includes('offer') ? sdp.includes('m=video') : 'n/a'} answerHasVideo=${label.includes('answer') ? sdp.includes('m=video') : 'n/a'} videoDirection=${direction}`);
+  }
+
+  private logPeerMediaState(participantId: string, peer: RTCPeerConnection): void {
+    const receivers = typeof peer.getReceivers === 'function' ? peer.getReceivers() : [];
+    const transceivers = typeof peer.getTransceivers === 'function' ? peer.getTransceivers() : [];
+    const receiverKinds = receivers.map((receiver) => `${receiver.track?.kind ?? 'none'}:${receiver.track?.id ?? 'none'}:${receiver.track?.readyState ?? 'none'}`).join(',');
+    const directions = transceivers.map((transceiver) => transceiver.direction).join(',');
+    console.log(`[WebRTC MEDIA] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} senders=${peer.getSenders().length} receivers=${receivers.length} receiverTracks=${receiverKinds} transceivers=${transceivers.length} directions=${directions}`);
   }
 
   private configureSender(sender: RTCRtpSender, track: MediaStreamTrack): void {

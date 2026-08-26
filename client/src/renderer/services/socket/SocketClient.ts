@@ -161,6 +161,7 @@ export class SocketClient {
       type: SignalingMessageType.WEBRTC_OFFER,
       payload: { roomCode, participantId, targetId, sdp },
     };
+    console.log(`[WebRTC SIGNAL] OFFER sent from=${participantId} to=${targetId}`);
     return this.send(message);
   }
 
@@ -175,6 +176,7 @@ export class SocketClient {
       type: SignalingMessageType.WEBRTC_ANSWER,
       payload: { roomCode, participantId, targetId, sdp },
     };
+    console.log(`[WebRTC SIGNAL] ANSWER sent from=${participantId} to=${targetId}`);
     return this.send(message);
   }
 
@@ -189,6 +191,7 @@ export class SocketClient {
       type: SignalingMessageType.ICE_CANDIDATE,
       payload: { roomCode, participantId, targetId, candidate },
     };
+    console.log(`[WebRTC ICE] candidate sent from=${participantId} to=${targetId}`);
     return this.send(message);
   }
 
@@ -319,14 +322,17 @@ export class SocketClient {
           break;
 
         case SignalingMessageType.WEBRTC_OFFER:
+          console.log(`[WebRTC SIGNAL] OFFER received local=${(message as WebRtcOfferMessage).payload.targetId} remote=${(message as WebRtcOfferMessage).payload.participantId}`);
           this.emit('webrtcOffer', { type: 'webrtcOffer', payload: { type: 'webrtcOffer', data: message as WebRtcOfferMessage } });
           break;
 
         case SignalingMessageType.WEBRTC_ANSWER:
+          console.log(`[WebRTC SIGNAL] ANSWER received local=${(message as WebRtcAnswerMessage).payload.targetId} remote=${(message as WebRtcAnswerMessage).payload.participantId}`);
           this.emit('webrtcAnswer', { type: 'webrtcAnswer', payload: { type: 'webrtcAnswer', data: message as WebRtcAnswerMessage } });
           break;
 
         case SignalingMessageType.ICE_CANDIDATE:
+          console.log(`[WebRTC ICE] candidate received local=${(message as IceCandidateMessage).payload.targetId} remote=${(message as IceCandidateMessage).payload.participantId}`);
           this.emit('iceCandidate', { type: 'iceCandidate', payload: { type: 'iceCandidate', data: message as IceCandidateMessage } });
           break;
 
