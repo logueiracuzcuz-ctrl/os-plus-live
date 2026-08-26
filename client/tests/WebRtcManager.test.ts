@@ -53,6 +53,42 @@ class FakeSocketClient implements ISocketClient {
   }
 }
 
+class RoutingSocketClient extends FakeSocketClient {
+  constructor(
+    private readonly participantId: string,
+    private readonly clients: Map<string, RoutingSocketClient>,
+  ) {
+    super();
+  }
+
+  override sendWebRtcOffer(roomCode: string, _participantId: string, targetId: string, sdp: RTCSessionDescriptionInit): boolean {
+    const sent = super.sendWebRtcOffer(roomCode, this.participantId, targetId, sdp);
+    this.clients.get(targetId)?.emit({
+      type: 'webrtcOffer',
+      payload: { type: 'webrtcOffer', data: { type: SignalingMessageType.WEBRTC_OFFER, payload: { roomCode, participantId: this.participantId, targetId, sdp } } },
+    });
+    return sent;
+  }
+
+  override sendWebRtcAnswer(roomCode: string, _participantId: string, targetId: string, sdp: RTCSessionDescriptionInit): boolean {
+    const sent = super.sendWebRtcAnswer(roomCode, this.participantId, targetId, sdp);
+    this.clients.get(targetId)?.emit({
+      type: 'webrtcAnswer',
+      payload: { type: 'webrtcAnswer', data: { type: SignalingMessageType.WEBRTC_ANSWER, payload: { roomCode, participantId: this.participantId, targetId, sdp } } },
+    });
+    return sent;
+  }
+
+  override sendIceCandidate(roomCode: string, _participantId: string, targetId: string, candidate: RTCIceCandidateInit): boolean {
+    const sent = super.sendIceCandidate(roomCode, this.participantId, targetId, candidate);
+    this.clients.get(targetId)?.emit({
+      type: 'iceCandidate',
+      payload: { type: 'iceCandidate', data: { type: SignalingMessageType.ICE_CANDIDATE, payload: { roomCode, participantId: this.participantId, targetId, candidate } } },
+    });
+    return sent;
+  }
+}
+
 class FakePeerConnection {
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
@@ -321,6 +357,58 @@ describe('WebRtcManager', () => {
       payload: { targetId: 'participant-c' },
     });
     manager.dispose();
+  });
+
+  it('routes independent A/B/C streams to the correct remote peer after connection', async () => {
+    const clients = new Map<string, RoutingSocketClient>();
+    const managers = new Map<string, WebRtcManager>();
+    const peers = new Map<string, Map<string, FakePeerConnection>>();
+    for (const localId of ['a', 'b', 'c']) {
+      const socket = new RoutingSocketClient(localId, clients);
+      clients.set(localId, socket);
+      const localPeers = new Map<string, FakePeerConnection>();
+      peers.set(localId, localPeers);
+      managers.set(localId, new WebRtcManager(socket, {
+        peerConnectionFactory: () => {
+          const peer = new FakePeerConnection();
+          return peer as unknown as RTCPeerConnection;
+        },
+      }));
+      managers.get(localId)?.setLocalParticipant('ROOM01', localId, localId === 'a');
+    }
+
+    const participants = ['a', 'b', 'c'];
+    for (const localId of participants) {
+      for (const remoteId of participants) {
+        if (localId === remoteId) continue;
+        const peer = managers.get(localId)?.getOrCreatePeer(remoteId) as unknown as FakePeerConnection;
+        peers.get(localId)?.set(remoteId, peer);
+      }
+    }
+    await waitForMicrotasks();
+
+    for (const localId of participants) {
+      const manager = managers.get(localId);
+      for (const remoteId of participants) {
+        if (localId === remoteId) continue;
+        const stream = { id: `stream-${remoteId}`, getTracks: () => [] } as unknown as MediaStream;
+        peers.get(localId)?.get(remoteId)?.ontrack?.({
+          track: { id: `track-${remoteId}`, kind: 'video', onended: null } as unknown as MediaStreamTrack,
+          streams: [stream],
+        } as unknown as RTCTrackEvent);
+        expect(manager?.getRemoteStream(remoteId)).toBe(stream);
+      }
+    }
+
+    expect(managers.get('a')?.getRemoteStreams().size).toBe(2);
+    expect(managers.get('b')?.getRemoteStreams().size).toBe(2);
+    expect(managers.get('c')?.getRemoteStreams().size).toBe(2);
+    expect(managers.get('a')?.getRemoteStream('b')?.id).toBe('stream-b');
+    expect(managers.get('a')?.getRemoteStream('c')?.id).toBe('stream-c');
+    expect(managers.get('b')?.getRemoteStream('a')?.id).toBe('stream-a');
+    expect(managers.get('c')?.getRemoteStream('a')?.id).toBe('stream-a');
+
+    for (const manager of managers.values()) manager.dispose();
   });
 
   it('answers an offer and flushes ICE queued before remote description', async () => {
