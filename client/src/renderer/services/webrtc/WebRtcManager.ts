@@ -64,6 +64,14 @@ export class WebRtcManager {
     this.rtcConfiguration = config.rtcConfiguration;
     this.onEvent = config.onEvent;
     this.peerConnectionFactory = config.peerConnectionFactory ?? ((configuration) => new RTCPeerConnection(configuration));
+    console.info('[WebRTC ICE CONFIG]', {
+      serverCount: this.rtcConfiguration?.iceServers?.length ?? 0,
+      servers: this.rtcConfiguration?.iceServers?.map((server) => ({
+        urls: server.urls,
+        hasUsername: Boolean(server.username),
+        hasCredential: Boolean(server.credential),
+      })) ?? [],
+    });
     this.start();
   }
 
@@ -105,8 +113,9 @@ export class WebRtcManager {
     const peer = this.peerConnectionFactory(this.rtcConfiguration);
     peer.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log(`[WebRTC ICE] candidate sent from=${this.localParticipantId ?? 'unknown'} to=${participantId}`);
-        this.sendIceCandidate(participantId, event.candidate.toJSON());
+        const candidate = event.candidate.toJSON();
+        console.log(`[WebRTC ICE SEND] from=${this.localParticipantId ?? 'unknown'} to=${participantId} type=${this.getCandidateType(candidate.candidate)}`);
+        this.sendIceCandidate(participantId, candidate);
       }
     };
     peer.ontrack = (event) => {
@@ -158,6 +167,9 @@ export class WebRtcManager {
       if (peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'closed') {
         this.closePeer(participantId);
       }
+    };
+    peer.onicecandidateerror = (event) => {
+      console.error(`[WebRTC ICE ERROR] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} url=${event.url ?? 'unknown'} code=${event.errorCode} text=${event.errorText}`);
     };
     peer.onicegatheringstatechange = () => {
       this.emit({
@@ -432,15 +444,17 @@ export class WebRtcManager {
     try {
       if (peer.remoteDescription) {
         await peer.addIceCandidate(message.payload.candidate);
+        console.log(`[WebRTC ICE APPLIED] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} type=${this.getCandidateType(message.payload.candidate.candidate)}`);
       } else {
         const pending = this.pendingIceCandidates.get(participantId) ?? [];
         pending.push(message.payload.candidate);
         this.pendingIceCandidates.set(participantId, pending);
-        console.log(`[WebRTC] ICE queued participantId=${participantId}`);
+        console.log(`[WebRTC ICE QUEUED] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} type=${this.getCandidateType(message.payload.candidate.candidate)}`);
       }
         console.log(`[WebRTC DEBUG] localParticipantId=${this.localParticipantId} remoteParticipantId=${participantId} signaling message sender=${participantId} target=${this.localParticipantId} peer selected for message=${participantId}`);
         console.log(`[WebRTC] ICE candidate received from=${participantId}`);
     } catch (error) {
+      console.error(`[WebRTC ICE ERROR] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} phase=receive`, error);
       this.reportError(participantId, error);
     }
   }
@@ -454,6 +468,7 @@ export class WebRtcManager {
     peer.onconnectionstatechange = null;
     peer.oniceconnectionstatechange = null;
     peer.onicegatheringstatechange = null;
+    peer.onicecandidateerror = null;
     peer.onsignalingstatechange = null;
     peer.close();
     this.peers.delete(participantId);
@@ -576,8 +591,13 @@ export class WebRtcManager {
     if (!pending) return;
     this.pendingIceCandidates.delete(participantId);
     for (const candidate of pending) {
-      await peer.addIceCandidate(candidate);
-      console.log(`[WebRTC] ICE applied participantId=${participantId}`);
+      try {
+        await peer.addIceCandidate(candidate);
+        console.log(`[WebRTC ICE APPLIED] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} type=${this.getCandidateType(candidate.candidate)}`);
+      } catch (error) {
+        console.error(`[WebRTC ICE ERROR] local=${this.localParticipantId ?? 'unknown'} remote=${participantId} phase=queued type=${this.getCandidateType(candidate.candidate)}`, error);
+        throw error;
+      }
     }
   }
 
@@ -598,6 +618,11 @@ export class WebRtcManager {
     });
     this.remoteStreams.delete(participantId);
     this.emit({ type: 'remoteStreamRemoved', participantId });
+  }
+
+  private getCandidateType(candidate: string | undefined): 'host' | 'srflx' | 'relay' | 'unknown' {
+    const type = candidate?.match(/ typ (host|srflx|relay)(?: |$)/)?.[1];
+    return type === 'host' || type === 'srflx' || type === 'relay' ? type : 'unknown';
   }
 
   private sendIceCandidate(participantId: string, candidate: RTCIceCandidateInit): void {
