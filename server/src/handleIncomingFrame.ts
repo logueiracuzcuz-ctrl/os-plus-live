@@ -9,6 +9,7 @@ import { handleCreateRoom } from './handleCreateRoom.js';
 import { handleJoinRoom } from './handleJoinRoom.js';
 import { handleLeaveRoom } from './handleLeaveRoom.js';
 import { handleWebRtcSignal, type WebRtcSignalMessage } from './handleWebRtcSignal.js';
+import { handleSharingState } from './handleSharingState.js';
 import type { Room, RoomManager } from './RoomManager.js';
 
 type BroadcastCallback = (room: Room, message: SignalingMessage, excludeWs?: WebSocket) => void;
@@ -48,6 +49,16 @@ export function handleIncomingFrame(
           }
         }
         return result.response;
+      }
+      return result;
+    }
+
+    case SignalingMessageType.PARTICIPANT_SHARING_CHANGED: {
+      const result = handleSharingState(ws, message, roomManager);
+      if (result?.type === SignalingMessageType.PARTICIPANT_SHARING_CHANGED && broadcast) {
+        const room = roomManager.getClientRoom(result.payload.participantId);
+        if (room) broadcast(room, result, ws);
+        return null;
       }
       return result;
     }

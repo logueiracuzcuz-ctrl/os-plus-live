@@ -14,6 +14,7 @@ import {
   type RoomJoinedMessage,
   type ParticipantJoinedMessage,
   type ParticipantLeftMessage,
+  type ParticipantSharingChangedMessage,
   type ErrorMessage,
   type WebRtcOfferMessage,
   type WebRtcAnswerMessage,
@@ -136,6 +137,15 @@ export class SocketClient {
     const message: LeaveRoomMessage = {
       type: SignalingMessageType.LEAVE_ROOM,
       payload: { roomCode, participantId },
+    };
+    return this.send(message);
+  }
+
+  /** Broadcast the local participant's screen-sharing state. */
+  sendSharingState(roomCode: string, participantId: string, isSharing: boolean): boolean {
+    const message: ParticipantSharingChangedMessage = {
+      type: SignalingMessageType.PARTICIPANT_SHARING_CHANGED,
+      payload: { roomCode, participantId, isSharing },
     };
     return this.send(message);
   }
@@ -299,6 +309,13 @@ export class SocketClient {
 
         case SignalingMessageType.PARTICIPANT_LEFT:
           this.emit('participantLeft', { type: 'participantLeft', payload: { type: 'participantLeft', data: message as ParticipantLeftMessage } });
+          break;
+
+        case SignalingMessageType.PARTICIPANT_SHARING_CHANGED:
+          this.emit('participantSharingChanged', {
+            type: 'participantSharingChanged',
+            payload: { type: 'participantSharingChanged', data: message as ParticipantSharingChangedMessage },
+          });
           break;
 
         case SignalingMessageType.WEBRTC_OFFER:

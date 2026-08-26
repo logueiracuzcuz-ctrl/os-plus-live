@@ -19,6 +19,8 @@ export enum SignalingMessageType {
   LEAVE_ROOM = 'LEAVE_ROOM',
   /** Server notifies that a participant left */
   PARTICIPANT_LEFT = 'PARTICIPANT_LEFT',
+  /** Participant starts or stops sharing a local screen. */
+  PARTICIPANT_SHARING_CHANGED = 'PARTICIPANT_SHARING_CHANGED',
   /** WebRTC SDP offer */
   WEBRTC_OFFER = 'WEBRTC_OFFER',
   /** WebRTC SDP answer */
@@ -130,6 +132,16 @@ export interface ParticipantLeftMessage extends SignalingMessage {
   };
 }
 
+/** Payload for a participant sharing state change. */
+export interface ParticipantSharingChangedMessage extends SignalingMessage {
+  type: SignalingMessageType.PARTICIPANT_SHARING_CHANGED;
+  payload: {
+    roomCode: string;
+    participantId: string;
+    isSharing: boolean;
+  };
+}
+
 /** Common routing information for WebRTC signaling messages. */
 export interface WebRtcSignalRouting {
   roomCode: string;
@@ -218,6 +230,7 @@ export type AnySignalingMessage =
   | ParticipantJoinedMessage
   | LeaveRoomMessage
   | ParticipantLeftMessage
+  | ParticipantSharingChangedMessage
   | WebRtcOfferMessage
   | WebRtcAnswerMessage
   | IceCandidateMessage

@@ -127,10 +127,16 @@ export function StateProvider({ children }: { children: ReactNode }): React.JSX.
     const handleCaptureEvent = (event: ScreenCaptureEvent): void => {
       if (event.type === 'started') {
         webRtcManager.setLocalStream(event.stream);
+        const room = stateRef.current.room;
+        if (room) socketClient.sendSharingState(room.code, room.participantId, true);
         dispatch({ type: 'SET_LOCAL_SHARING', isSharing: true });
+        console.log(`[Sharing] started participantId=${room?.participantId ?? 'unknown'}`);
       } else if (event.type === 'stopped') {
         webRtcManager.clearLocalStream();
+        const room = stateRef.current.room;
+        if (room) socketClient.sendSharingState(room.code, room.participantId, false);
         dispatch({ type: 'SET_LOCAL_SHARING', isSharing: false });
+        console.log(`[Sharing] stopped participantId=${room?.participantId ?? 'unknown'}`);
       }
     };
     screenCapture.on(handleCaptureEvent);
@@ -138,7 +144,7 @@ export function StateProvider({ children }: { children: ReactNode }): React.JSX.
       screenCapture.off(handleCaptureEvent);
       screenCapture.dispose();
     };
-  }, [dispatch, screenCapture, webRtcManager]);
+  }, [dispatch, screenCapture, socketClient, webRtcManager]);
 
   useEffect(() => {
     const handleStateChange = (event: SocketEvent): void => {
@@ -192,6 +198,16 @@ export function StateProvider({ children }: { children: ReactNode }): React.JSX.
         dispatch({ type: 'UPDATE_PARTICIPANTS', participants });
       }
     };
+    const handleSharingChanged = (event: SocketEvent): void => {
+      if (event.type !== 'participantSharingChanged' || !stateRef.current.room) return;
+      const { roomCode, participantId, isSharing } = event.payload.data.payload;
+      if (roomCode !== stateRef.current.room.code) return;
+      const participants = stateRef.current.room.participants.map((participant) =>
+        participant.id === participantId ? { ...participant, isSharing } : participant,
+      );
+      dispatch({ type: 'UPDATE_PARTICIPANTS', participants });
+      console.log(`[Sharing] ${isSharing ? 'started' : 'stopped'} participantId=${participantId}`);
+    };
     const handleServerError = (event: SocketEvent): void => {
       if (event.type === 'serverError') {
         console.error('[AppContext] Server error:', event.payload.data);
@@ -206,6 +222,7 @@ export function StateProvider({ children }: { children: ReactNode }): React.JSX.
     socketClient.on('roomJoined', handleRoomJoined);
     socketClient.on('participantJoined', handleParticipantJoined);
     socketClient.on('participantLeft', handleParticipantLeft);
+    socketClient.on('participantSharingChanged', handleSharingChanged);
     socketClient.on('serverError', handleServerError);
     webRtcManager.start();
     socketClient.connect();
@@ -219,6 +236,7 @@ export function StateProvider({ children }: { children: ReactNode }): React.JSX.
       socketClient.off('roomJoined', handleRoomJoined);
       socketClient.off('participantJoined', handleParticipantJoined);
       socketClient.off('participantLeft', handleParticipantLeft);
+      socketClient.off('participantSharingChanged', handleSharingChanged);
       socketClient.off('serverError', handleServerError);
       webRtcManager.dispose();
       socketClient.disconnect();

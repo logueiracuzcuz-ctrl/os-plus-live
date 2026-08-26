@@ -13,23 +13,25 @@ interface RoomMediaViewProps {
 }
 
 interface SelectedVideoProps {
+  participantId: string;
   stream: MediaStream;
   participantName: string;
   isFocused: boolean;
   onToggleFocus: () => void;
 }
 
-const SelectedVideo = memo(function SelectedVideo({ stream, participantName, isFocused, onToggleFocus }: SelectedVideoProps): React.JSX.Element {
+const SelectedVideo = memo(function SelectedVideo({ participantId, stream, participantName, isFocused, onToggleFocus }: SelectedVideoProps): React.JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     video.srcObject = stream;
+    console.log(`[UI] stream attached participantId=${participantId}`);
     return () => {
       if (video.srcObject === stream) video.srcObject = null;
     };
-  }, [stream]);
+  }, [participantId, stream]);
 
   return (
     <div className="selected-video">
@@ -116,6 +118,7 @@ export function RoomMediaView({ participants, currentUserId }: RoomMediaViewProp
       <div className="room-media-view__stage">
         {selectedStream && selectedParticipant
           ? <SelectedVideo
+              participantId={selectedParticipantId ?? currentUserId}
               stream={selectedStream}
               participantName={selectedParticipant.displayName}
               isFocused={isFocused}

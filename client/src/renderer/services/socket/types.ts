@@ -5,6 +5,7 @@ import type {
   ErrorMessage,
   ParticipantJoinedMessage,
   ParticipantLeftMessage,
+  ParticipantSharingChangedMessage,
   RoomCreatedMessage,
   RoomJoinedMessage,
   WebRtcAnswerMessage,
@@ -29,6 +30,7 @@ export type SocketEventType =
   | 'roomJoined'
   | 'participantJoined'
   | 'participantLeft'
+  | 'participantSharingChanged'
   | 'serverError'
   | 'webrtcOffer'
   | 'webrtcAnswer'
@@ -44,6 +46,7 @@ export interface SocketEventPayloadMap {
   roomJoined: { type: 'roomJoined'; data: RoomJoinedMessage };
   participantJoined: { type: 'participantJoined'; data: ParticipantJoinedMessage };
   participantLeft: { type: 'participantLeft'; data: ParticipantLeftMessage };
+  participantSharingChanged: { type: 'participantSharingChanged'; data: ParticipantSharingChangedMessage };
   serverError: { type: 'serverError'; data: ErrorMessage };
   webrtcOffer: { type: 'webrtcOffer'; data: WebRtcOfferMessage };
   webrtcAnswer: { type: 'webrtcAnswer'; data: WebRtcAnswerMessage };

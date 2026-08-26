@@ -26,6 +26,7 @@ export interface ISocketClient {
   createRoom(displayName: string): boolean;
   joinRoom(roomCode: string, displayName: string): boolean;
   leaveRoom(roomCode: string, participantId: string): boolean;
+  sendSharingState(roomCode: string, participantId: string, isSharing: boolean): boolean;
   sendWebRtcOffer(roomCode: string, participantId: string, targetId: string, sdp: RTCSessionDescriptionInit): boolean;
   sendWebRtcAnswer(roomCode: string, participantId: string, targetId: string, sdp: RTCSessionDescriptionInit): boolean;
   sendIceCandidate(roomCode: string, participantId: string, targetId: string, candidate: RTCIceCandidateInit): boolean;

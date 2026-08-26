@@ -31,6 +31,7 @@ export class Room {
   /** Keeps the original host identity so the room code remains reusable. */
   hostConnected: boolean;
   viewers: Map<string, ClientConnection>;
+  private readonly sharingParticipantIds = new Set<string>();
   state: RoomState;
   lastActivityAt: number;
 
@@ -63,6 +64,7 @@ export class Room {
     } else {
       this.viewers.delete(clientId);
     }
+    this.sharingParticipantIds.delete(clientId);
     this.lastActivityAt = Date.now();
   }
 
@@ -98,6 +100,23 @@ export class Room {
     ];
   }
 
+  /** Updates whether an active participant is currently sharing. */
+  setParticipantSharing(clientId: string, isSharing: boolean): boolean {
+    const participant = this.host.id === clientId
+      ? (this.hostConnected ? this.host : undefined)
+      : this.viewers.get(clientId);
+    if (!participant) return false;
+
+    if (isSharing) {
+      this.sharingParticipantIds.add(clientId);
+    } else {
+      this.sharingParticipantIds.delete(clientId);
+    }
+    this.state = this.sharingParticipantIds.size > 0 ? RoomState.SHARING : RoomState.WAITING;
+    this.lastActivityAt = Date.now();
+    return true;
+  }
+
   /** Returns participant info list for all active participants. */
   getParticipants(): ParticipantInfo[] {
     const participants: ParticipantInfo[] = [];
@@ -106,7 +125,7 @@ export class Room {
         id: this.host.id,
         displayName: this.host.displayName,
         isHost: true,
-        isSharing: this.state === RoomState.SHARING,
+        isSharing: this.sharingParticipantIds.has(this.host.id),
         joinedAt: this.host.joinedAt,
       });
     }
@@ -116,7 +135,7 @@ export class Room {
         id: viewer.id,
         displayName: viewer.displayName,
         isHost: false,
-        isSharing: false,
+        isSharing: this.sharingParticipantIds.has(viewer.id),
         joinedAt: viewer.joinedAt,
       });
     }

@@ -115,13 +115,14 @@ export class WebRtcManager {
       }
       track.onended = () => this.removeRemoteTrack(participantId, stream, track);
       this.emit({ type: 'remoteStream', participantId, stream });
-      console.log(`[WebRtcManager] Remote stream received participantId=${participantId}`);
+      console.log(`[WebRTC] track received participantId=${participantId} kind=${track.kind}`);
+      console.log(`[WebRTC] remote stream available participantId=${participantId}`);
     };
     peer.onnegotiationneeded = () => {
       void this.createOffer(participantId);
     };
     this.peers.set(participantId, peer);
-    this.addLocalTracks(peer);
+    this.addLocalTracks(peer, participantId);
     peer.onconnectionstatechange = () => {
       this.emit({
         type: 'connectionStateChanged',
@@ -222,8 +223,9 @@ export class WebRtcManager {
     if (this.localStream === stream) return;
     this.clearLocalStream();
     this.localStream = stream;
+    console.log(`[WebRTC] local stream set tracks=${stream.getTracks().length}`);
     for (const [participantId, peer] of this.peers) {
-      this.addLocalTracks(peer);
+      this.addLocalTracks(peer, participantId);
       void this.createOffer(participantId);
     }
   }
@@ -268,7 +270,9 @@ export class WebRtcManager {
   async createOffer(participantId: string): Promise<void> {
     if (!this.localRoomCode || !this.localParticipantId) return;
 
+    const wasPending = this.negotiationPending.has(participantId);
     this.negotiationPending.add(participantId);
+    if (!wasPending) console.log(`[WebRTC] negotiation requested peer=${participantId}`);
     if (this.negotiating.has(participantId)) return;
 
     const peer = this.getOrCreatePeer(participantId);
@@ -305,6 +309,7 @@ export class WebRtcManager {
     const participantId = message.payload.participantId;
 
     const peer = this.getOrCreatePeer(participantId);
+    console.log(`[WebRTC] offer received from=${participantId}`);
     const offerCollision = this.negotiating.has(participantId) || peer.signalingState !== 'stable';
     const isPolite = this.isPolitePeer(participantId);
     if (offerCollision && !isPolite) {
@@ -347,7 +352,7 @@ export class WebRtcManager {
     try {
       await peer.setRemoteDescription(message.payload.sdp);
       await this.flushPendingIceCandidates(participantId, peer);
-      console.log(`[WebRtcManager] Answer received from ${participantId}`);
+      console.log(`[WebRTC] answer received from=${participantId}`);
       if (this.negotiationPending.has(participantId)) {
         void this.createOffer(participantId);
       }
@@ -426,13 +431,14 @@ export class WebRtcManager {
     this.listeners.clear();
   }
 
-  private addLocalTracks(peer: RTCPeerConnection): void {
+  private addLocalTracks(peer: RTCPeerConnection, participantId: string): void {
     if (!this.localStream) return;
     for (const track of this.localStream.getTracks()) {
       const alreadyAdded = peer.getSenders().some((sender) => sender.track === track);
       if (!alreadyAdded) {
         const sender = peer.addTrack(track, this.localStream);
         this.configureSender(sender, track);
+        console.log(`[WebRTC] local track added peer=${participantId} kind=${track.kind}`);
       }
     }
   }
