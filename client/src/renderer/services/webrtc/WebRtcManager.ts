@@ -32,6 +32,8 @@ export class WebRtcManager {
   private readonly remoteStreams = new Map<string, MediaStream>();
   private readonly negotiating = new Set<string>();
   private readonly negotiationPending = new Set<string>();
+  private readonly settingRemoteAnswer = new Set<string>();
+  private readonly cancelledOffers = new Set<string>();
   private readonly pendingSignals: Array<WebRtcOfferMessage | WebRtcAnswerMessage | IceCandidateMessage> = [];
   private localStream: MediaStream | null = null;
   private localRoomCode: string | null = null;
@@ -119,6 +121,7 @@ export class WebRtcManager {
       console.log(`[WebRTC] remote stream available participantId=${participantId}`);
     };
     peer.onnegotiationneeded = () => {
+      console.log(`[WebRTC] negotiation requested peer=${participantId}`);
       void this.createOffer(participantId);
     };
     this.peers.set(participantId, peer);
@@ -225,8 +228,8 @@ export class WebRtcManager {
     this.localStream = stream;
     console.log(`[WebRTC] local stream set tracks=${stream.getTracks().length}`);
     for (const [participantId, peer] of this.peers) {
+      // addTrack triggers negotiationneeded; the per-peer queue handles it.
       this.addLocalTracks(peer, participantId);
-      void this.createOffer(participantId);
     }
   }
 
@@ -268,21 +271,33 @@ export class WebRtcManager {
   }
 
   async createOffer(participantId: string): Promise<void> {
-    if (!this.localRoomCode || !this.localParticipantId) return;
+    this.requestNegotiation(participantId);
+  }
 
-    const wasPending = this.negotiationPending.has(participantId);
-    this.negotiationPending.add(participantId);
-    if (!wasPending) console.log(`[WebRTC] negotiation requested peer=${participantId}`);
-    if (this.negotiating.has(participantId)) return;
+  private requestNegotiation(participantId: string): void {
+    if (!this.localRoomCode || !this.localParticipantId) return;
+    if (!this.negotiationPending.has(participantId)) {
+      this.negotiationPending.add(participantId);
+      console.log(`[WebRTC] negotiation queued participantId=${participantId}`);
+    }
+    const peer = this.getOrCreatePeer(participantId);
+    this.flushNegotiation(participantId, peer);
+  }
+
+  private async startNegotiation(participantId: string): Promise<void> {
+    if (!this.localRoomCode || !this.localParticipantId || this.negotiating.has(participantId)) return;
 
     const peer = this.getOrCreatePeer(participantId);
-    if (peer.signalingState !== 'stable') return;
+    if (peer.signalingState !== 'stable') {
+      this.requestNegotiation(participantId);
+      return;
+    }
 
-    this.negotiationPending.delete(participantId);
     this.negotiating.add(participantId);
     try {
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
+      if (this.cancelledOffers.delete(participantId)) return;
       const localDescription = peer.localDescription ?? offer;
       const sent = this.socketClient.sendWebRtcOffer(
         this.localRoomCode,
@@ -291,14 +306,13 @@ export class WebRtcManager {
         localDescription,
       );
       if (!sent) throw new Error('Could not send WebRTC offer');
-      console.log(`[WebRTC] offer sent to=${participantId}`);
+      console.log(`[WebRTC] offer created participantId=${participantId}`);
+      console.log(`[WebRTC] offer sent participantId=${participantId}`);
     } catch (error) {
       this.reportError(participantId, error);
     } finally {
       this.negotiating.delete(participantId);
-      if (this.negotiationPending.has(participantId) && peer.signalingState === 'stable') {
-        void this.createOffer(participantId);
-      }
+      this.flushNegotiation(participantId, peer);
     }
   }
 
@@ -309,8 +323,10 @@ export class WebRtcManager {
     const participantId = message.payload.participantId;
 
     const peer = this.getOrCreatePeer(participantId);
-    console.log(`[WebRTC] offer received from=${participantId}`);
-    const offerCollision = this.negotiating.has(participantId) || peer.signalingState !== 'stable';
+    console.log(`[WebRTC] offer received participantId=${participantId}`);
+    const readyForOffer = !this.negotiating.has(participantId)
+      && (peer.signalingState === 'stable' || this.settingRemoteAnswer.has(participantId));
+    const offerCollision = message.payload.sdp.type === 'offer' && !readyForOffer;
     const isPolite = this.isPolitePeer(participantId);
     if (offerCollision && !isPolite) {
       console.log(`[WebRtcManager] Ignoring colliding offer from ${participantId}`);
@@ -319,9 +335,11 @@ export class WebRtcManager {
 
     try {
       if (offerCollision) {
+        this.cancelledOffers.add(participantId);
         await peer.setLocalDescription({ type: 'rollback' });
       }
       await peer.setRemoteDescription(message.payload.sdp);
+      console.log(`[WebRTC] remote description set participantId=${participantId}`);
       await this.flushPendingIceCandidates(participantId, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
@@ -333,9 +351,12 @@ export class WebRtcManager {
         peer.localDescription ?? answer,
       );
       if (!sent) throw new Error('Could not send WebRTC answer');
-      console.log(`[WebRTC] answer sent to=${participantId}`);
+      console.log(`[WebRTC] answer created participantId=${participantId}`);
+      console.log(`[WebRTC] answer sent participantId=${participantId}`);
     } catch (error) {
       this.reportError(participantId, error);
+    } finally {
+      this.flushNegotiation(participantId, peer);
     }
   }
 
@@ -350,14 +371,17 @@ export class WebRtcManager {
     }
 
     try {
+      this.settingRemoteAnswer.add(participantId);
       await peer.setRemoteDescription(message.payload.sdp);
+      this.settingRemoteAnswer.delete(participantId);
+      console.log(`[WebRTC] answer received participantId=${participantId}`);
+      console.log(`[WebRTC] remote description set participantId=${participantId}`);
       await this.flushPendingIceCandidates(participantId, peer);
-      console.log(`[WebRTC] answer received from=${participantId}`);
-      if (this.negotiationPending.has(participantId)) {
-        void this.createOffer(participantId);
-      }
     } catch (error) {
+      this.settingRemoteAnswer.delete(participantId);
       this.reportError(participantId, error);
+    } finally {
+      this.flushNegotiation(participantId, peer);
     }
   }
 
@@ -373,6 +397,7 @@ export class WebRtcManager {
         const pending = this.pendingIceCandidates.get(participantId) ?? [];
         pending.push(message.payload.candidate);
         this.pendingIceCandidates.set(participantId, pending);
+        console.log(`[WebRTC] ICE queued participantId=${participantId}`);
       }
       console.log(`[WebRTC] ICE candidate received from=${participantId}`);
     } catch (error) {
@@ -394,6 +419,8 @@ export class WebRtcManager {
     this.pendingIceCandidates.delete(participantId);
     this.negotiating.delete(participantId);
     this.negotiationPending.delete(participantId);
+    this.settingRemoteAnswer.delete(participantId);
+    this.cancelledOffers.delete(participantId);
     const remoteStream = this.remoteStreams.get(participantId);
     if (remoteStream) {
       remoteStream.getTracks().forEach((track) => {
@@ -416,6 +443,8 @@ export class WebRtcManager {
     this.pendingIceCandidates.clear();
     this.negotiating.clear();
     this.negotiationPending.clear();
+    this.settingRemoteAnswer.clear();
+    this.cancelledOffers.clear();
   }
 
   dispose(): void {
@@ -463,6 +492,16 @@ export class WebRtcManager {
     });
   }
 
+  private flushNegotiation(participantId: string, peer?: RTCPeerConnection): void {
+    if (!this.negotiationPending.has(participantId)) return;
+    const currentPeer = peer ?? this.peers.get(participantId);
+    if (!currentPeer || this.negotiating.has(participantId) || currentPeer.signalingState !== 'stable') return;
+
+    this.negotiationPending.delete(participantId);
+    console.log(`[WebRTC] negotiation pending consumed participantId=${participantId}`);
+    void this.startNegotiation(participantId);
+  }
+
   private async flushPendingIceCandidates(
     participantId: string,
     peer: RTCPeerConnection,
@@ -472,6 +511,7 @@ export class WebRtcManager {
     this.pendingIceCandidates.delete(participantId);
     for (const candidate of pending) {
       await peer.addIceCandidate(candidate);
+      console.log(`[WebRTC] ICE applied participantId=${participantId}`);
     }
   }
 

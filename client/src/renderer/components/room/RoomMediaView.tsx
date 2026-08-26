@@ -26,8 +26,14 @@ const SelectedVideo = memo(function SelectedVideo({ participantId, stream, parti
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.srcObject = stream;
-    console.log(`[UI] stream attached participantId=${participantId}`);
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+    void video.play().then(() => {
+      console.log(`[UI] stream attached participantId=${participantId}`);
+    }).catch(() => {
+      // Autoplay can be rejected by a browser policy; the muted video remains ready to play.
+    });
     return () => {
       if (video.srcObject === stream) video.srcObject = null;
     };

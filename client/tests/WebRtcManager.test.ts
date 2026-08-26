@@ -23,6 +23,7 @@ class FakeSocketClient implements ISocketClient {
   createRoom(): boolean { return true; }
   joinRoom(): boolean { return true; }
   leaveRoom(): boolean { return true; }
+  sendSharingState(): boolean { return true; }
   sendWebRtcOffer(roomCode: string, participantId: string, targetId: string, sdp: RTCSessionDescriptionInit): boolean {
     this.sent.push({ type: SignalingMessageType.WEBRTC_OFFER, payload: { roomCode, participantId, targetId, sdp } });
     return true;
@@ -59,6 +60,7 @@ class FakePeerConnection {
   localDescription: RTCSessionDescription | null = null;
   remoteDescription: RTCSessionDescription | null = null;
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
+  ontrack: ((event: RTCTrackEvent) => void) | null = null;
   onnegotiationneeded: (() => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
@@ -229,15 +231,43 @@ describe('WebRtcManager', () => {
     await waitForMicrotasks();
     expect(peer.addedTracks).toContain(firstTrack);
     expect(socket.sent.filter((message) => message.type === SignalingMessageType.WEBRTC_OFFER)).toHaveLength(1);
-    peer.signalingState = 'stable';
+
+    const answer = (): void => {
+      peer.signalingState = 'stable';
+      socket.emit({
+        type: 'webrtcAnswer',
+        payload: { type: 'webrtcAnswer', data: {
+          type: SignalingMessageType.WEBRTC_ANSWER,
+          payload: { roomCode: 'ROOM01', participantId: 'b', targetId: 'a', sdp: { type: 'answer', sdp: 'answer' } },
+        } },
+      });
+    };
+    answer();
+    await waitForMicrotasks();
 
     manager.clearLocalStream();
     await waitForMicrotasks();
+    expect(socket.sent.filter((message) => message.type === SignalingMessageType.WEBRTC_OFFER)).toHaveLength(2);
+    answer();
+    await waitForMicrotasks();
+
     const secondTrack = {} as MediaStreamTrack;
     manager.setLocalStream({ getTracks: () => [secondTrack] } as unknown as MediaStream);
     await waitForMicrotasks();
     expect(peer.addedTracks).toContain(secondTrack);
-    expect(socket.sent.filter((message) => message.type === SignalingMessageType.WEBRTC_OFFER).length).toBeGreaterThanOrEqual(2);
+    expect(socket.sent.filter((message) => message.type === SignalingMessageType.WEBRTC_OFFER)).toHaveLength(3);
+    answer();
+    await waitForMicrotasks();
+
+    const remoteStream = { getTracks: () => [] } as unknown as MediaStream;
+    const remoteEvents: string[] = [];
+    manager.on((event) => {
+      if (event.type === 'remoteStream') remoteEvents.push(event.participantId);
+    });
+    peer.ontrack?.({ track: {} as MediaStreamTrack, streams: [remoteStream] } as unknown as RTCTrackEvent);
+    expect(manager.getRemoteStream('b')).toBe(remoteStream);
+    expect(remoteEvents).toEqual(['b']);
+    expect(manager.getPeer('b')).toBe(peer as unknown as RTCPeerConnection);
     manager.dispose();
   });
 
